@@ -1,0 +1,16 @@
+subject: Message 3321 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-09-09 09:05:06
+Log_no: 3121
+C_S: G72
+Source: DataLogger
+date: 2509090900
+Volt: 14.21
+Bat1: 0.7
+Bat2: 12
+Lat: 54.2711
+Lon: -10.2769
+col10: 0.96
+col11: 250.2
+col12: 9999
+----------------------------------------

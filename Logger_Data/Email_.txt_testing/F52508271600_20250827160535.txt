@@ -1,0 +1,16 @@
+subject: Message 3016 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-27 16:05:35
+Log_no: 2816
+C_S: G72
+Source: DataLogger
+date: 2508271600
+Volt: 14.18
+Bat1: 1.2
+Bat2: 7
+Lat: 54.2710
+Lon: -10.2764
+col10: 3.41
+col11: 94.9
+col12: 9999
+----------------------------------------

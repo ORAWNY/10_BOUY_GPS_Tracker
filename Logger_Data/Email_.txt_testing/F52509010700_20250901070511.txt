@@ -1,0 +1,16 @@
+subject: Message 3127 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-09-01 07:05:11
+Log_no: 2927
+C_S: G72
+Source: DataLogger
+date: 2509010700
+Volt: 12.65
+Bat1: 0.8
+Bat2: 10
+Lat: 54.2711
+Lon: -10.2762
+col10: 0.50
+col11: 317.5
+col12: 9999
+----------------------------------------

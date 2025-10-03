@@ -1,0 +1,7 @@
+id,kind,name
+Stale-seed,Stale,Time since last data > threshold
+Threshold-seed,Threshold,Generic threshold exceeded (R/A/G)
+Threshold-auto,Threshold,Generic threshold exceeded (R/A/G) (2)
+97c7fb1b-e135-4829-bb12-3d4da1a0594e,Threshold,Generic threshold exceeded (R/A/G) (3)
+f39388de-3e60-48d2-bc6b-14453246ad02,Threshold,Generic threshold exceeded (R/A/G) (4)
+Distance-auto,Distance,Distance from deployment (AMBER/RED)

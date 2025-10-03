@@ -1,0 +1,16 @@
+subject: Message 2979 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-26 03:05:10
+Log_no: 2779
+C_S: G72
+Source: DataLogger
+date: 2508260300
+Volt: 12.79
+Bat1: 0.9
+Bat2: 9
+Lat: 54.2711
+Lon: -10.2765
+col10: 1.91
+col11: 61.7
+col12: 9999
+----------------------------------------

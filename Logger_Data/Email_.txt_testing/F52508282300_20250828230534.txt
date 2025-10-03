@@ -1,0 +1,16 @@
+subject: Message 3047 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-28 23:05:34
+Log_no: 2847
+C_S: G72
+Source: DataLogger
+date: 2508282300
+Volt: 12.84
+Bat1: 1.2
+Bat2: 7
+Lat: 54.2709
+Lon: -10.2764
+col10: 0.92
+col11: 36.8
+col12: 9999
+----------------------------------------

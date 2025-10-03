@@ -1,0 +1,16 @@
+subject: Message 3138 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-09-01 18:05:08
+Log_no: 2938
+C_S: G72
+Source: DataLogger
+date: 2509011800
+Volt: 14.18
+Bat1: 0.9
+Bat2: 9
+Lat: 54.2710
+Lon: -10.2757
+col10: 2.61
+col11: 315.8
+col12: 9999
+----------------------------------------

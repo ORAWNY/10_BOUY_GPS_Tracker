@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="PYTHON_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/Derived_databases" />
+      <excludeFolder url="file://$MODULE_DIR$/build" />
+      <excludeFolder url="file://$MODULE_DIR$/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/11082025/data" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/11082025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/11082025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/11082025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025t2/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025t2/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/15092025t2/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/16092025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/16092025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/16092025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/17092025/data" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/17092025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/17092025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/17092025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/22092025/data" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/22092025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/22092025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/22092025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/25092025/exports" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/25092025/state" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/25092025/tmp" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/PIL" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/cartopy" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/charset_normalizer" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/contourpy" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/kiwisolver" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/markupsafe" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/numpy" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/pandas/_libs" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/pyogrio" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/scipy" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/shapely" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/tornado" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/win32" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/BuoyTools (2)/BuoyTools/BuoyTools/_internal/win32com" />
+      <excludeFolder url="file://$MODULE_DIR$/test_projects/Webhook_API" />
+    </content>
+    <orderEntry type="jdk" jdkName="Python 3.13 (10_BOUY_GPS_Tracker)" jdkType="Python SDK" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

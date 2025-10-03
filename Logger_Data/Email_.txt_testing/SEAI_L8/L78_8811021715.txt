@@ -1,0 +1,2 @@
+#D,100,##,L78,DataLogger,K1,K1,M2,M2,881102171500,BATTERY,12,Volt,13.73,bat1,25.81,bat2,25.82,bat3,25.15,Lat,54.2708,Lon,-10.2770,col9,1.0,col10,8,col12,1.13,col13,41.3,col14,9999,**
+#D,100,##,L78,DataLogger,K1,K1,M2,M2,881102171500,BATTERY,12,Volt,13.73,bat1,25.81,bat2,25.82,bat3,25.15,Lat,54.2708,Lon,-10.2770,col9,1.0,col10,8,col12,1.13,col13,41.3,col14,9999,**

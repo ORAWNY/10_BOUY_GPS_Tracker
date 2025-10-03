@@ -1,0 +1,16 @@
+subject: Message 2997 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-26 21:05:52
+Log_no: 2797
+C_S: G72
+Source: DataLogger
+date: 2508262100
+Volt: 12.84
+Bat1: 2.5
+Bat2: 6
+Lat: 54.2713
+Lon: -10.2769
+col10: 0.46
+col11: 264.8
+col12: 9999
+----------------------------------------

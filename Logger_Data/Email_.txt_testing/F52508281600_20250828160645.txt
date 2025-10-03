@@ -1,0 +1,16 @@
+subject: Message 3040 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-28 16:06:45
+Log_no: 2840
+C_S: G72
+Source: DataLogger
+date: 2508281600
+Volt: 14.17
+Bat1: 1.6
+Bat2: 6
+Lat: 54.2709
+Lon: -10.2763
+col10: 2.65
+col11: 246.1
+col12: 9999
+----------------------------------------

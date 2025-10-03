@@ -1,0 +1,16 @@
+subject: Message 3080 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-30 08:05:34
+Log_no: 2880
+C_S: G72
+Source: DataLogger
+date: 2508300800
+Volt: 12.74
+Bat1: 1.8
+Bat2: 7
+Lat: 54.2710
+Lon: -10.2769
+col10: 1.54
+col11: 279.3
+col12: 9999
+----------------------------------------

@@ -1,0 +1,352 @@
+{
+  "_meta": {
+    "about": "Lookup for S/D formats with S→D emit controls. New: support for using received time snapped to previous 10-min mark.",
+    "example": {
+      "filename_pattern": "(C_S)(received_last10min)",
+      "result_example": "S23251001104000",
+      "explanation": "C_S = 'S23', received at 2025-10-01 10:40:12 → snapped to 10:40:00 → 251001104000"
+    },
+    "d_template": "#D,100,##,XYZ,TAG,K1,K1,M2,M2,YYMMDDHHMMSS,BATTERY_LABEL,BATTERY_VALUE,PARAM,VALUE,...,**",
+    "fields": {
+      "xyz_from": "Name of S-column whose value populates XYZ. Alternatively use a static 'xyz'.",
+      "tag_from": "Name of S-column whose value populates TAG. Alternatively use a static 'tag'.",
+      "k1": "Static literal for K1 code (duplicated in output).",
+      "m2_from": "Name of S-column to use for M2 (duplicated). If absent, 'm2' static is used.",
+      "m2": "Static alphanumeric used for M2 when 'm2_from' is not provided.",
+      "timestamp_field": "One of: an S-column name; 'received_last10min' (or legacy 'recieved_last10min'); 'use_nearest_10_min'; 'transmit_ts12' (or 'transmit_time'); or 'transmit_last10min' (also accepts 'transit_*' variants).",
+      "battery_label": "Label inserted before battery value (e.g., BATTERY).",
+      "battery_value": "Static battery value to emit (e.g., '12').",
+      "param_order": "Array of S-column names to emit as PARAM,VALUE pairs in this order.",
+      "param_labels": "Optional mapping to rename PARAM labels (e.g., {'Bat1':'bat1'}).",
+      "filename_tokens": "In patterns, you can also use (received_last10min) to embed the snapped time in YYMMDDHHMMSS."
+    }
+  },
+  "senders": {
+    "300534064751110@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "SEAI_GB2",
+          "columns": ["Log_no","C_S","Source","date","Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+          "emit_d": {
+            "_note": "M2 is a static literal; XYZ/TAG come from S columns.",
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064798880@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "Magnora_L8",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "_note": "Here M2 is pulled from the S column 'C_L' instead of a static literal.",
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2_from": "C_L",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064793880@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "BOUY2_L8",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064796890@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "SEAI_L8",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064792860@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "TGS_ALPHA_L8",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064756110@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "TGS_BRAVO_L8",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064752110@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "SEAI_GB1",
+          "columns": ["Log_no","C_S","Source","date","Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2_from": "C_S",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534068522890@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_L1",
+          "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "transmit_last10min",
+            "k1": "K1",
+            "m2": "L1",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vestor_AVG_SPEED","col11","col12","col13","Lat","Lon"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064793870@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_L3",
+          "columns": ["Log_no","C_S","Source","date","Battery","BattA","BattB","OpVolt","PNL1V","GPDOP","GPSSC","lat","lon","SOGM","GPSB","wcdist"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "transmit_last10min",
+            "k1": "K1",
+            "m2": "L3",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Battery","BattA","BattB","OpVolt","PNL1V","GPDOP","GPSSC","lat","lon","SOGM","GPSB","wcdist"],
+            "param_labels": {"BatteryA":"BattA","BatteryB":"BattB","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064799870@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_MOS2_SBC1_",
+          "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vestor_AVG_SPEED","col11","col12","col13"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "payload_date_time",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vestor_AVG_SPEED","col11","col12","col13"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A1","A2","A3","A4","W2","W3","W4","W5","W6","W7","W8"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534068529870@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_MOS2_SBC2_",
+          "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vestor_AVG_SPEED","col11","col12","col13"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "payload_date_time",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vestor_AVG_SPEED","col11","col12","col13"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A1","A2","A3","A4","W2","W3","W4","W5","W6","W7","W8"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534068527890@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_L9",
+          "columns": ["Log_no","C_S","Source","date","BATTERY_A","Battery_B"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "transmit_last10min",
+            "k1": "K1",
+            "m2": "L9",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["BATTERY_A","Battery_B"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","A4","W2","W3","W4","W5","W6","W7","W8"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534068523870@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "EW1_L2",
+          "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "Source",
+            "timestamp_field": "transmit_last10min",
+            "k1": "K1",
+            "m2": "L2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","A4","W2","W3","W4","W5","W6","W7","W8"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    }
+  }
+}

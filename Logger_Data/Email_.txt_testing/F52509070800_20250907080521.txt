@@ -1,0 +1,16 @@
+subject: Message 3273 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-09-07 08:05:21
+Log_no: 3072
+C_S: G72
+Source: DataLogger
+date: 2509070800
+Volt: 12.94
+Bat1: 0.9
+Bat2: 10
+Lat: 54.2713
+Lon: -10.2764
+col10: 2.58
+col11: 29.6
+col12: 9999
+----------------------------------------

@@ -1,0 +1,16 @@
+subject: Message 3003 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-27 03:05:16
+Log_no: 2803
+C_S: G72
+Source: DataLogger
+date: 2508270300
+Volt: 12.79
+Bat1: 0.9
+Bat2: 9
+Lat: 54.2712
+Lon: -10.2771
+col10: 4.60
+col11: 83.3
+col12: 9999
+----------------------------------------

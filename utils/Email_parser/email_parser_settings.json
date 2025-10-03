@@ -1,0 +1,36 @@
+{
+  "global_interval_min": 15,
+  "parsers": [
+    {
+      "name": "metocean_db",
+      "refresh_tabs": true,
+      "core": {
+        "mailbox": "metocean configuration",
+        "output_format": "db",
+        "db_path": "C:/data/metocean/email_data.db",
+        "output_dir": "",
+        "file_granularity": "day",
+        "lookup_path": "C:/data/metocean/lookups",
+        "filename_pattern": "(payload_datetime)",
+        "missing_value": "",
+        "parser_name": "metocean_db",
+        "state_dir": "C:/data/metocean/state",
+
+        "folder_paths": [
+          ["INBOX"],
+          ["INBOX", "Alerts"]
+        ],
+
+        "imap_enabled": true,
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_user": "metocean.configuration@greenrebel.ie",
+        "imap_ssl": true,
+
+
+        "imap_pass_env": "IMAP_PASS",
+        "imap_pass_plain": ""
+      }
+    }
+  ]
+}

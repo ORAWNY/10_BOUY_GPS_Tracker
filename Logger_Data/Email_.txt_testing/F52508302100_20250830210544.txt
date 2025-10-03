@@ -1,0 +1,16 @@
+subject: Message 3093 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-30 21:05:44
+Log_no: 2893
+C_S: G72
+Source: DataLogger
+date: 2508302100
+Volt: 12.86
+Bat1: 1.2
+Bat2: 9
+Lat: 54.2711
+Lon: -10.2763
+col10: 1.33
+col11: 349.3
+col12: 9999
+----------------------------------------

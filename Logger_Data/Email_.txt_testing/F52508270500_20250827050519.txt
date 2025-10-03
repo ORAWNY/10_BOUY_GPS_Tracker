@@ -1,0 +1,16 @@
+subject: Message 3005 from RockBLOCK 300534064751110
+sender: 300534064751110@rockblock.rock7.com
+received_time: 2025-08-27 05:05:19
+Log_no: 2805
+C_S: G72
+Source: DataLogger
+date: 2508270500
+Volt: 12.75
+Bat1: 0.8
+Bat2: 10
+Lat: 54.2710
+Lon: -10.2765
+col10: 2.86
+col11: 248.3
+col12: 9999
+----------------------------------------
