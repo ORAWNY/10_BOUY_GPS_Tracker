@@ -17,6 +17,9 @@ from typing import List, Callable, Optional, Dict, Any, Sequence, Tuple
 import requests
 import tempfile
 import shutil
+import base64
+import zlib
+import binascii
 
 
 try:
@@ -43,6 +46,171 @@ PAYLOAD_RE = re.compile(r"^(?:\[[^\]]+\])?#([SD]),(.*)$")
 
 # Reserved columns always present in DB tables
 RESERVED_COLS = ("id", "subject", "sender", "received_time")
+
+# ------------ Compressed / encoded payload helpers ------------
+_DATA_LINE_RE = re.compile(r"(?im)^\s*Data\s*:\s*(.+?)\s*$")
+
+def _strip_quotes(s: str) -> str:
+    s = (s or "").strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        return s[1:-1].strip()
+    return s
+
+def _find_encoded_payload_line(body: str) -> Optional[str]:
+    """
+    Prefer a 'Data: <blob>' line if present; else fall back to the last non-empty line.
+    Returns the raw candidate string (not yet decoded).
+    """
+    if not body:
+        return None
+    m = _DATA_LINE_RE.search(body)
+    if m:
+        return _strip_quotes(m.group(1))
+    # fallback: last non-empty line
+    for line in reversed((body or "").splitlines()):
+        line = _strip_quotes(line.strip())
+        if line:
+            return line
+    return None
+
+def _find_encoded_payload_candidates(body: str) -> List[str]:
+    """
+    Return candidate encoded payload strings in order of preference.
+    Prefers lines *after* the 'Data:' header (the next non-empty, non-header lines),
+    then the inline content on the 'Data:' line, then finally the last non-empty line.
+    """
+    if not body:
+        return []
+    lines = body.splitlines()
+    candidates: List[str] = []
+
+    # locate "Data:" header line
+    for idx, raw in enumerate(lines):
+        m = _DATA_LINE_RE.match(raw)
+        if not m:
+            continue
+        inline = _strip_quotes(m.group(1)).strip()
+        # collect subsequent non-empty lines until the next header-like line (e.g., "IMEI:", "MOMSN:", etc.)
+        j = idx + 1
+        while j < len(lines):
+            nxt = _strip_quotes(lines[j].strip())
+            if not nxt:
+                j += 1
+                continue
+            # another header? stop
+            if re.match(r"^[A-Za-z][A-Za-z0-9 _-]*:\s", nxt):
+                break
+            candidates.append(nxt)   # e.g., the 'eJw...' or 'x\x9c...' line
+            j += 1
+        # consider inline value too (lower priority than the following lines)
+        if inline:
+            candidates.append(inline)
+        break  # only first Data: block
+
+    # fallback: last non-empty line in the whole body
+    if not candidates:
+        for line in reversed(lines):
+            s = _strip_quotes(line.strip())
+            if s:
+                candidates.append(s)
+                break
+
+    # Dedup but keep order
+    seen = set()
+    uniq: List[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return uniq
+
+
+def _looks_base64(s: str) -> bool:
+    s = re.sub(r"\s+", "", s or "")
+    if not s:
+        return False
+    # If it's pure hex, treat it as NOT base64 (we'll try hex paths instead)
+    if re.fullmatch(r"[0-9A-Fa-f]+", s) is not None:
+        return False
+    # base64 alphabet and length multiple of 4
+    return re.fullmatch(r"[A-Za-z0-9+/=]+", s) is not None and (len(s) % 4 == 0)
+
+
+def _decode_python_escaped_bytes(s: str) -> Optional[bytes]:
+    """
+    Turn a string like:  x\\x9c%\\xc8;...  into the actual bytes b'x\\x9c%\\xc8;...'
+    We go through 'unicode_escape' → bytes.
+    """
+    try:
+        # first, turn backslash escapes into actual chars
+        unescaped = bytes(s, "utf-8").decode("unicode_escape")
+        # then map 1:1 codepoints to bytes
+        return unescaped.encode("latin1", errors="ignore")
+    except Exception:
+        return None
+
+def _maybe_decode_compressed_payload(s: str) -> Optional[str]:
+    """
+    Try to get plaintext '#D,...' or '#S,...' from the blob:
+      0) HEX that decodes to ASCII that looks like BASE64 -> base64 -> zlib
+      1) BASE64 -> zlib
+      2) Python-escaped bytes text ('x\\x9c..') -> zlib
+      3) HEX of the escaped representation -> unescape -> zlib
+    """
+    if not s:
+        return None
+    candidate = s.strip()
+
+    # Strategy 0: HEX -> (ASCII) that looks like BASE64 -> zlib
+    try:
+        if re.fullmatch(r"[0-9A-Fa-f]+", candidate):
+            b = bytes.fromhex(candidate)
+            ascii_text = b.decode("latin1", errors="ignore").strip()
+            if _looks_base64(ascii_text):
+                raw = base64.b64decode(ascii_text, validate=False)
+                out = zlib.decompress(raw).decode("utf-8", errors="replace")
+                if PAYLOAD_RE.search(out):
+                    return out.strip()
+    except Exception:
+        pass
+
+    # Strategy 1: Base64 → zlib
+    try:
+        if _looks_base64(candidate):
+            raw = base64.b64decode(candidate, validate=False)
+            out = zlib.decompress(raw).decode("utf-8", errors="replace")
+            if PAYLOAD_RE.search(out):
+                return out.strip()
+    except Exception:
+        pass
+
+    # Strategy 2: Python-escaped string with \x.. escapes
+    try:
+        if r"\x" in candidate or "\\x" in candidate:
+            raw2 = _decode_python_escaped_bytes(candidate)
+            if raw2:
+                out = zlib.decompress(raw2).decode("utf-8", errors="replace")
+                if PAYLOAD_RE.search(out):
+                    return out.strip()
+    except Exception:
+        pass
+
+    # Strategy 3: HEX of the escaped representation ("78 5c 9c ..." -> "x\\x9c...") -> zlib
+    try:
+        if re.fullmatch(r"[0-9A-Fa-f]+", candidate):
+            stage1 = bytes.fromhex(candidate)
+            stage1_text = stage1.decode("latin1", errors="ignore")
+            stage2 = _decode_python_escaped_bytes(stage1_text)
+            if stage2:
+                out = zlib.decompress(stage2).decode("utf-8", errors="replace")
+                if PAYLOAD_RE.search(out):
+                    return out.strip()
+    except Exception:
+        pass
+
+    return None
+
+
 
 
 # --------------------- Config ---------------------
@@ -2015,7 +2183,19 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         }
 
                     lookup = _load_lookup_bundle(cfg.lookup_path, sender_email, logger)
+
+                    # Try normal plaintext payloads first
                     payloads = _iter_payload_lines(body)
+
+                    # If none, attempt to decode a compressed/encoded blob near the "Data:" section (multi-line aware)
+                    if not payloads:
+                        for cand in _find_encoded_payload_candidates(body):
+                            decoded = _maybe_decode_compressed_payload(cand)
+                            if decoded:
+                                # Append the decoded line to the body so the rest of the pipeline remains unchanged
+                                body = (body or "").rstrip() + "\n" + decoded + "\n"
+                                payloads = _iter_payload_lines(body)
+                                break
 
                     # ---------- No payload ----------
                     if not payloads:
