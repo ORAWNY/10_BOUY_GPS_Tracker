@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Optional
 import os
+import re
 
 from PyQt6.QtCore import Qt, QDateTime
 from PyQt6.QtWidgets import (
@@ -11,10 +12,35 @@ from PyQt6.QtWidgets import (
 )
 
 from utils.Email_parser.email_parser_core import (
-    EmailParserConfig, DEFAULT_MAILBOX, list_outlook_folder_paths, _FTPSession
+    EmailParserConfig, DEFAULT_MAILBOX, list_outlook_folder_paths
 )
+from utils.Email_parser.email_parser_ftp import FTPSession
+
 
 DT_FORMAT = "yyyy-MM-dd HH:mm:ss"
+
+def _hhmm_to_minutes(s: str) -> int:
+    """
+    Parse strings like '+01:15', '-00:30', '1:00', '90' (minutes), or '0'.
+    Returns signed minutes. Invalid/blank -> 0.
+    """
+    raw = (s or "").strip()
+    if not raw:
+        return 0
+    # Pure integer (minutes)
+    if re.fullmatch(r"[+-]?\d+", raw):
+        try:
+            return int(raw)
+        except Exception:
+            return 0
+    # HH:MM with optional sign
+    m = re.fullmatch(r"\s*([+-])?\s*(\d{1,2})\s*:\s*(\d{1,2})\s*", raw)
+    if not m:
+        return 0
+    sign = -1 if (m.group(1) == "-") else 1
+    hh = int(m.group(2))
+    mm = int(m.group(3))
+    return sign * (hh * 60 + mm)
 
 
 class CollapsibleSection(QWidget):
@@ -171,6 +197,8 @@ class EmailParserDialog(QDialog):
         self.ftp_check_chk.setChecked(getattr(self._initial, "ftp_check_on_start", True))
         self.ftp_delete_chk = QCheckBox("Delete local files after upload")
         self.ftp_delete_chk.setChecked(getattr(self._initial, "ftp_delete_local_after_upload", False))
+        self.ftp_vrf_chk = QCheckBox("Create .vrf control file for TXT uploads")
+        self.ftp_vrf_chk.setChecked(getattr(self._initial, "ftp_make_vrf_files", False))
         self.ftp_test_btn = QPushButton("Test FTP…")
         self.ftp_test_btn.clicked.connect(self._test_ftp)
 
@@ -181,6 +209,7 @@ class EmailParserDialog(QDialog):
         ftp_form.addRow("Remote directory:", self.ftp_dir_edit)
         ftp_form.addRow(self.ftp_tls_chk)
         ftp_form.addRow(self.ftp_pasv_chk)
+        ftp_form.addRow(self.ftp_vrf_chk)
         ftp_form.addRow("Timeout (s):", self.ftp_timeout_edit)
         ftp_form.addRow(self.ftp_check_chk)
         ftp_form.addRow(self.ftp_delete_chk)
@@ -202,10 +231,12 @@ class EmailParserDialog(QDialog):
         # Filename pattern
         self.pattern_edit = QLineEdit(self._initial.filename_pattern or "(payload_datetime)")
         pattern_help = QLabel(
-            "Use bracketed tokens: (payload_datetime), (date), (time), (datetime), (sender), (folder), (received_last10min)\n"
-            "Examples: (C_S)(received_last10min) → S23251001104000\n"
-            "TXT 10-min rounding is driven by your lookup JSON via "
-            "emit_d.timestamp_field = received_last10min / recieved_last10min / use_nearest_10_min."
+            "Filename tokens (case-insensitive): (payload_datetime), (date), (time), (datetime), "
+            "(sender), (folder), (received_last10min) / (use_nearest_10_min), and TX tokens "
+            "(transmit_time),(transmit_ts12),(transmit_iso) [also 'transit_*' aliases]. "
+            "When granularity='email' and your pattern has no time-like token, the HHMMSS is appended.\n"
+            "Examples: (C_S)(received_last10min) → S23251001104000; "
+            "(TAG)_(transmit_time) → L3_251001104000"
         )
         pattern_help.setStyleSheet("color: gray; font-style: italic;")
 
@@ -214,6 +245,47 @@ class EmailParserDialog(QDialog):
         self.missing_combo.setEditable(True)
         self.missing_combo.addItems(["", "-9999", "N/A", "0"])
         self.missing_combo.setCurrentText(self._initial.missing_value or "")
+
+        # ── NEW: TXT/D-line timestamp behavior & time shifts ─────────────────
+        self.grp_time = QGroupBox("Timestamp & Time Shifts")
+        time_form = QFormLayout(self.grp_time)
+
+        txt = QLabel(
+            "TXT timestamp override works for #S→#D and inbound #D lines.\n"
+            "• Lookup 'timestamp_field' can be a column name, 'received_last10min' (or 'use_nearest_10_min'), "
+            "'transmit_time'/'transmit_ts12', or 'transmit_last10min'. You may add an inline offset like '+01:10'.\n"
+            "• After that, the global Payload shift below (if enabled) is applied.\n"
+            "• Filename tokens can use the snapped/shifted values via the tokens listed above."
+        )
+        txt.setStyleSheet("color: gray;")
+        time_form.addRow(txt)
+
+        # Fallback TXT timestamp base (only used when lookup doesn't specify)
+        self.txt_mode_combo = QComboBox()
+        self.txt_mode_combo.addItems(["payload", "received_prev10"])
+        self.txt_mode_combo.setCurrentText(getattr(self._initial, "txt_timestamp_mode", "payload"))
+        time_form.addRow("TXT fallback timestamp base:", self.txt_mode_combo)
+
+        # Payload time shift
+        self.chk_shift_payload = QCheckBox("Shift payload timestamps by")
+        self.chk_shift_payload.setChecked(bool(getattr(self._initial, "shift_payload_time", False)))
+        self.shift_payload_edit = QLineEdit(getattr(self._initial, "payload_time_shift", "+00:00"))
+        self.shift_payload_edit.setPlaceholderText("+HH:MM or minutes")
+        time_row1 = QHBoxLayout()
+        time_row1.addWidget(self.chk_shift_payload)
+        time_row1.addWidget(self.shift_payload_edit, 1)
+        time_form.addRow(time_row1)
+
+        # Filename time shift
+        self.chk_shift_filename = QCheckBox("Shift filename time tokens by")
+        self.chk_shift_filename.setChecked(bool(getattr(self._initial, "shift_filename_time", False)))
+        self.shift_filename_edit = QLineEdit(getattr(self._initial, "filename_time_shift", "+00:00"))
+        self.shift_filename_edit.setPlaceholderText("+HH:MM or minutes")
+        time_row2 = QHBoxLayout()
+        time_row2.addWidget(self.chk_shift_filename)
+        time_row2.addWidget(self.shift_filename_edit, 1)
+        time_form.addRow(time_row2)
+        # ────────────────────────────────────────────────────────────────────
 
         # Auto-run
         self.auto_run_check = QCheckBox("Enable auto-run for this parser")
@@ -233,6 +305,7 @@ class EmailParserDialog(QDialog):
         out_form.addRow("Filename pattern:", self.pattern_edit)
         out_form.addRow("Missing value:", self.missing_combo)
         out_form.addRow(pattern_help)
+        out_form.addRow(self.grp_time)
         out_form.addRow("", self.auto_run_check)
 
         sec_output = CollapsibleSection("Output & Formatting", out_container, start_collapsed=False)
@@ -420,7 +493,7 @@ class EmailParserDialog(QDialog):
         self.gran_combo.setVisible(files_mode)
         self.pattern_edit.setVisible(files_mode)
 
-        # Lookup applies to all modes (keep visible)
+        # Lookup applies to all modes
         for i in range(self.lookup_row.count()):
             w = self.lookup_row.itemAt(i).widget()
             if w:
@@ -435,6 +508,13 @@ class EmailParserDialog(QDialog):
 
         # Show FTP group only if FTP is enabled
         self.grp_ftp.setVisible(files_mode and self.chk_upload_ftp.isChecked())
+        # Show the .vrf option only when TXT + FTP
+        show_vrf = files_mode and self.chk_upload_ftp.isChecked() and (self.format_combo.currentText().lower() == "txt")
+        if hasattr(self, "ftp_vrf_chk"):
+            self.ftp_vrf_chk.setVisible(show_vrf)
+
+        # Time-shift group only for files (affects TXT and filenames)
+        self.grp_time.setVisible(files_mode)
 
     # ──────────────────────────────────────
     # Outlook folder picker handlers
@@ -525,7 +605,7 @@ class EmailParserDialog(QDialog):
             quiet=False,
         )
         try:
-            with _FTPSession(tmp) as sess:
+            with FTPSession(tmp) as sess:
                 ok, msg = sess.test_connection()
             if ok:
                 QMessageBox.information(self, "FTP", "Connection OK.")
@@ -553,6 +633,18 @@ class EmailParserDialog(QDialog):
         cfg.filename_code = ""  # legacy, unused
         cfg.missing_value = self.missing_combo.currentText()
         cfg.auto_run = self.auto_run_check.isChecked()
+
+        # TXT fallback (used when lookup doesn't specify timestamp_field)
+        cfg.txt_timestamp_mode = (self.txt_mode_combo.currentText() or "payload").strip().lower()
+
+        # Global shifts (payload & filename)
+        cfg.shift_payload_time = self.chk_shift_payload.isChecked()
+        cfg.payload_time_shift = (self.shift_payload_edit.text() or "").strip() or "+00:00"
+        cfg.payload_time_shift_minutes = _hhmm_to_minutes(cfg.payload_time_shift)
+
+        cfg.shift_filename_time = self.chk_shift_filename.isChecked()
+        cfg.filename_time_shift = (self.shift_filename_edit.text() or "").strip() or "+00:00"
+        cfg.filename_time_shift_minutes = _hhmm_to_minutes(cfg.filename_time_shift)
 
         # Source flags
         src = self.source_combo.currentText()
@@ -607,6 +699,7 @@ class EmailParserDialog(QDialog):
         cfg.ftp_passive = self.ftp_pasv_chk.isChecked()
         cfg.ftp_check_on_start = self.ftp_check_chk.isChecked()
         cfg.ftp_delete_local_after_upload = self.ftp_delete_chk.isChecked()
+        cfg.ftp_make_vrf_files = getattr(self, "ftp_vrf_chk", None).isChecked() if hasattr(self, "ftp_vrf_chk") else False
 
         # Default name if needed
         if not cfg.parser_name:
@@ -621,7 +714,6 @@ class EmailParserDialog(QDialog):
         # Guard: in FILE modes, require at least one destination
         if fmt != "db" and not (cfg.use_local_output or cfg.use_ftp_output):
             QMessageBox.warning(self, "Output destination", "Choose at least one destination: local and/or FTP.")
-            # Default to local so a caller that immediately runs doesn't fail silently
             cfg.use_local_output = True
 
         return cfg
