@@ -5,12 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="09848a77-3268-4985-958e-47189ff9bc8f" name="Changes" comment="updated_commit_24092025">
-      <change afterPath="$PROJECT_DIR$/utils/Email_parser/email_parser_ftp.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/Email_parser/email_parser_timeshifter.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_header_lookup.json" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_header_lookup.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_parser_core.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_parser_core.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_parser_dialog.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_parser_dialog.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/charts/compass.png" beforeDir="false" afterPath="$PROJECT_DIR$/utils/charts/compass.png" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -109,7 +106,7 @@
       <option name="presentableId" value="Default" />
       <updated>1754663214217</updated>
       <workItem from="1759242996760" duration="55464000" />
-      <workItem from="1760001672522" duration="7807000" />
+      <workItem from="1760001672522" duration="15390000" />
     </task>
     <task id="LOCAL-00001" summary="updated_commit_24092025">
       <option name="closed" value="true" />
@@ -176,7 +173,7 @@
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/gui_py$email_parser_core.coverage" NAME="email_parser_core Coverage Results" MODIFIED="1759323304430" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils/Email_parser" />
     <SUITE FILE_PATH="coverage/gui_py$build_hydraparse.coverage" NAME="build_hydraparse Coverage Results" MODIFIED="1759500235994" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/gui_py$gui.coverage" NAME="gui Coverage Results" MODIFIED="1760004966666" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/gui_py$Wind_Wave_Compass.coverage" NAME="Wind_Wave_Compass Coverage Results" MODIFIED="1760080902037" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils/charts" />
+    <SUITE FILE_PATH="coverage/gui_py$gui.coverage" NAME="gui Coverage Results" MODIFIED="1760096889932" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/gui_py$Wind_Wave_Compass.coverage" NAME="Wind_Wave_Compass Coverage Results" MODIFIED="1760095708578" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils/charts" />
   </component>
 </project>
