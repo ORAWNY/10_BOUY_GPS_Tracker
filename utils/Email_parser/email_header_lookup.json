@@ -1,25 +1,58 @@
 {
   "_meta": {
-    "about": "Lookup for S/D formats with S→D emit controls. New: support for using received time snapped to previous 10-min mark.",
-    "example": {
-      "filename_pattern": "(C_S)(received_last10min)",
-      "result_example": "S23251001104000",
-      "explanation": "C_S = 'S23', received at 2025-10-01 10:40:12 → snapped to 10:40:00 → 251001104000"
+    "about": "Lookup for S/D formats with S→D emit controls. Adds generic period rounding: first/last + N minutes, for received (rx) and transmit (tx) time.",
+    "timestamp_field_syntax": {
+      "sources": ["tx", "transmit", "transit", "rx", "received"],
+      "forms": [
+        "tx",
+        "tx_last10", "tx_first10", "tx_last5", "tx_first30",
+        "rx_last10", "rx_first5", "received_first15",
+        "aliases with 'min' suffix accepted (e.g., rx_first10min)"
+      ],
+      "meaning": {
+        "lastN": "floor to previous N-minute boundary, SS=00",
+        "firstN": "ceil to next N-minute boundary, SS=00"
+      },
+      "inline_offset": "You may append ' +HH:MM' or ' -HH:MM' (applied after the first/last rounding).",
+      "examples": [
+        {
+          "spec": "transmit_last10",
+          "from": "251007150159",
+          "to": "251007150000",
+          "note": "TX floored to previous 10-min boundary"
+        },
+        {
+          "spec": "transmit_first10",
+          "from": "251007150159",
+          "to": "251007151000",
+          "note": "TX ceiled to next 10-min boundary"
+        },
+        {
+          "spec": "received_first5",
+          "rx_at": "2025-10-07 15:01:59",
+          "to": "251007150500",
+          "note": "RX ceiled to next 5-min boundary"
+        },
+        {
+          "spec": "rx_first30 -00:20",
+          "rx_at": "2025-10-07 15:01:59",
+          "to": "251007153000 then minus 20 min -> 251007151000"
+        }
+      ]
     },
-    "d_template": "#D,100,##,XYZ,TAG,K1,K1,M2,M2,YYMMDDHHMMSS,BATTERY_LABEL,BATTERY_VALUE,PARAM,VALUE,...,**",
-    "fields": {
-      "xyz_from": "Name of S-column whose value populates XYZ. Alternatively use a static 'xyz'.",
-      "tag_from": "Name of S-column whose value populates TAG. Alternatively use a static 'tag'.",
-      "k1": "Static literal for K1 code (duplicated in output).",
-      "m2_from": "Name of S-column to use for M2 (duplicated). If absent, 'm2' static is used.",
-      "m2": "Static alphanumeric used for M2 when 'm2_from' is not provided.",
-      "timestamp_field": "One of: an S-column name; 'received_last10min' (or legacy 'recieved_last10min'); 'use_nearest_10_min'; 'transmit_ts12' (or 'transmit_time'); or 'transmit_last10min' (also accepts 'transit_*' variants).",
-      "battery_label": "Label inserted before battery value (e.g., BATTERY).",
-      "battery_value": "Static battery value to emit (e.g., '12').",
-      "param_order": "Array of S-column names to emit as PARAM,VALUE pairs in this order.",
-      "param_labels": "Optional mapping to rename PARAM labels (e.g., {'Bat1':'bat1'}).",
-      "filename_tokens": "In patterns, you can also use (received_last10min) to embed the snapped time in YYMMDDHHMMSS."
-    }
+    "filename_tokens": {
+      "dynamic": [
+        "(received_firstN)", "(received_lastN)", "(transmit_firstN)", "(transmit_lastN)"
+      ],
+      "notes": [
+        "N is minutes, e.g. (received_first10), (transmit_last5).",
+        "Raw transmit tokens still available: (transmit_time)/(transmit_ts12)/(transmit_iso)."
+      ]
+    },
+    "still_applies_to": [
+      "S→D conversion (TXT export)",
+      "Inbound #D (timestamp override at position 10)"
+    ]
   },
   "senders": {
     "300534064751110@rockblock.rock7.com": {
