@@ -1,0 +1,16 @@
+PyQt6
+pandas
+requests
+pywin32; sys_platform == "win32"
+
+# Geospatial / mapping
+cartopy
+matplotlib
+shapely
+pyproj
+
+# Timezone data (safe cross-platform)
+tzdata
+
+# If you need zoneinfo on Python < 3.9, uncomment:
+# backports.zoneinfo

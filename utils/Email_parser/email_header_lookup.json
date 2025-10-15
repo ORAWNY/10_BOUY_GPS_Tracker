@@ -315,7 +315,7 @@
           "emit_d": {
             "xyz_from": "C_S",
             "tag_from": "Source",
-            "timestamp_field": "payload_date_time",
+            "timestamp_field": "payload_date_time +01:00",
             "k1": "K1",
             "m2": "M2",
             "battery_label": "BATTERY",
