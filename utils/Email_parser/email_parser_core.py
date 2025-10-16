@@ -29,13 +29,36 @@ except Exception:  # pragma: no cover
 
 from utils.Email_parser.email_parser_ftp import FTPSession
 from utils.Email_parser.email_parser_timeshifter import (
+    # generic shifting/parsing
     parse_shift_to_minutes,
     shift_ts12_minutes,
     shift_iso_minutes,
     apply_payload_shift_if_enabled,
+
+    # filename tokens
     compose_filename_tokens,
-    parse_timeish_expr,     # ← NEW
+    make_filename_extra_tokens,
+
+    # lookup decisions
+    lookup_timestamp_field,
+    lookup_uses_transmit_time,
+    lookup_uses_transmit_last10,
+    lookup_uses_received_last10,
+
+    # transmit time extraction
+    extract_transmit_time_from_body,
+
+    # cfg normalization
+    normalize_time_shifts_inplace,
+
+    # canonical payload timestamp decision + helpers
+    compute_effective_payload_ts12,
+    find_ts_idx_in_D_tokens,
+    normalize_ts_len12,
+    yymmddhhmm_from_received,
+    received_prev10_ts12_from_received_time,
 )
+
 
 DEFAULT_MAILBOX = "metocean configuration"
 
@@ -211,8 +234,6 @@ def _maybe_decode_compressed_payload(s: str) -> Optional[str]:
     return None
 
 
-
-
 # --------------------- Config ---------------------
 @dataclass
 class EmailParserConfig:
@@ -231,7 +252,7 @@ class EmailParserConfig:
     lookup_path: str = ""                # sender-based lookups: file or folder
 
     # filename controls (BRACKETED TOKENS: e.g., "(payload_datetime)_(Log_no)")
-    filename_pattern: str = "payload_date_time"  # dialog usually sets "(payload_datetime)"
+    filename_pattern: str = "(payload_date_time)"  # dialog usually sets "(payload_datetime)"
     filename_code: str = ""                       # unused now (kept for back-compat)
 
     # fill used when a value is missing/blank ('' = write blank; e.g., '-9999', 'N/A')
@@ -245,7 +266,7 @@ class EmailParserConfig:
     # --- lookback window from the last checkpoint (in hours) ---
     lookback_hours: int = 2
 
-    # --- Webhook (poll a public URL for newly arrived RockBLOCK posts)
+    # --- Webhook (poll a public URL for newly arrived RockBLOCK posts) ---
     webhook_enabled: bool = False
     webhook_url: str = ""  # e.g., https://your-host.example/feed
     webhook_auth_header: str = ""  # e.g., 'Authorization: Bearer XYZ'
@@ -260,11 +281,26 @@ class EmailParserConfig:
     update_checkpoint: bool = True  # False = don’t advance checkpoints after this run
     reset_state_before_run: bool = False  # True = drop this parser's state before run
 
-    # --- NEW: TXT timestamp override + quiet logging (per parser) ---
+    # TXT timestamp override + quiet logging (per parser) ---
     txt_timestamp_mode: str = "payload"  # "payload" | "received_prev10"
-    quiet: bool = True                   # True = minimal logging
+    quiet: bool = False  # True = minimal logging
 
-    # --- NEW: OUTPUT DESTINATIONS ---
+    # time shifts (persisted) ---
+    # Payload line timestamps (#D lines and S→D) will be shifted if enabled
+    shift_payload_time: bool = False
+    payload_time_shift: str = "+00:00"  # UI text, e.g. "+01:00" or "-30"
+    payload_time_shift_minutes: int = 0  # parsed minutes
+
+    # Filename time tokens (e.g., (payload_datetime), (rx_last10), etc.)
+    shift_filename_time: bool = False
+    filename_time_shift: str = "+00:00"  # UI text
+    filename_time_shift_minutes: int = 0  # parsed minutes
+
+    # DST-aware timezone conversion (assume inputs are UTC)
+    use_timezone_shift: bool = False  # enable UTC→TZ conversion
+    timezone_name: str = ""  # e.g. "Europe/London" / "America/New_York"
+
+    # OUTPUT DESTINATIONS ---
     # Local vs FTP destinations: either or both may be enabled.
     use_local_output: bool = True
     use_ftp_output: bool = False
@@ -280,8 +316,7 @@ class EmailParserConfig:
     ftp_timeout: int = 20              # seconds
     ftp_check_on_start: bool = True    # test connect/cwd before run
     ftp_delete_local_after_upload: bool = False  # if True, delete local files after upload
-    ftp_make_vrf_files: bool = False     # NEW: if True (and txt + FTP), create .vrf alongside each .txt
-
+    ftp_make_vrf_files: bool = False   # NEW: if True (and txt + FTP), create .vrf alongside each .txt
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -293,41 +328,85 @@ class EmailParserConfig:
         gran = d.get("file_granularity", None)
         if gran is None and isinstance(per_email, bool):
             gran = "email" if per_email else "day"
+
+        # ---- Normalize time-shift fields (parse "+HH:MM" → minutes) ----
+        payload_time_shift = d.get("payload_time_shift", "+00:00")
+        payload_minutes = int(d.get("payload_time_shift_minutes", 0) or 0)
+        if not payload_minutes and payload_time_shift:
+            try:
+                payload_minutes = parse_shift_to_minutes(payload_time_shift)
+            except Exception:
+                payload_minutes = 0
+
+        filename_time_shift = d.get("filename_time_shift", "+00:00")
+        filename_minutes = int(d.get("filename_time_shift_minutes", 0) or 0)
+        if not filename_minutes and filename_time_shift:
+            try:
+                filename_minutes = parse_shift_to_minutes(filename_time_shift)
+            except Exception:
+                filename_minutes = 0
+        # ----------------------------------------------------------------
+
         return EmailParserConfig(
             mailbox=d.get("mailbox", DEFAULT_MAILBOX),
             db_path=d.get("db_path", ""),
             folder_paths=list(d.get("folder_paths", [])),
             auto_run=bool(d.get("auto_run", False)),
+
+            # --- FILE OUTPUTS ---
             output_format=d.get("output_format", d.get("format", "db")),
             output_dir=d.get("output_dir", ""),
             file_granularity=(gran or "day"),
             lookup_path=d.get("lookup_path", d.get("lookup_file", "")),
+
             filename_pattern=d.get("filename_pattern", "payload_date_time"),
             filename_code=d.get("filename_code", ""),
             missing_value=d.get("missing_value", ""),
+
+            # --- per-parser state (project folder) ---
             state_dir=d.get("state_dir", ""),
             parser_name=d.get("parser_name", d.get("name", "")),
             refresh_tabs=bool(d.get("refresh_tabs", True)),
+
+            # --- lookback window ---
             lookback_hours=int(d.get("lookback_hours", 2)),
+
+            # --- Webhook ---
             webhook_enabled=bool(d.get("webhook_enabled", False)),
             webhook_url=d.get("webhook_url", ""),
             webhook_auth_header=d.get("webhook_auth_header", ""),
             webhook_since_param=d.get("webhook_since_param", "since"),
             webhook_limit_param=d.get("webhook_limit_param", "limit"),
             webhook_limit=int(d.get("webhook_limit", 200)),
+
+            # --- Manual range / checkpoint control ---
             manual_from=d.get("manual_from", ""),
             manual_to=d.get("manual_to", ""),
             respect_checkpoint=bool(d.get("respect_checkpoint", True)),
             update_checkpoint=bool(d.get("update_checkpoint", True)),
             reset_state_before_run=bool(d.get("reset_state_before_run", False)),
+
+            # TXT timestamp override + quiet logging
             txt_timestamp_mode=d.get("txt_timestamp_mode", "payload"),
             quiet=bool(d.get("quiet", True)),
 
-            # NEW: destinations
+            # --- time shifts (persisted) ---
+            shift_payload_time=bool(d.get("shift_payload_time", False)),
+            payload_time_shift=payload_time_shift,
+            payload_time_shift_minutes=payload_minutes,
+
+            shift_filename_time=bool(d.get("shift_filename_time", False)),
+            filename_time_shift=filename_time_shift,
+            filename_time_shift_minutes=filename_minutes,
+
+            use_timezone_shift=bool(d.get("use_timezone_shift", False)),
+            timezone_name=d.get("timezone_name", ""),
+
+            # --- OUTPUT DESTINATIONS ---
             use_local_output=bool(d.get("use_local_output", True)),
             use_ftp_output=bool(d.get("use_ftp_output", False)),
 
-            # NEW: ftp
+            # --- FTP/FTPS settings ---
             ftp_host=d.get("ftp_host", ""),
             ftp_port=int(d.get("ftp_port", 21)),
             ftp_username=d.get("ftp_username", ""),
@@ -339,48 +418,13 @@ class EmailParserConfig:
             ftp_check_on_start=bool(d.get("ftp_check_on_start", True)),
             ftp_delete_local_after_upload=bool(d.get("ftp_delete_local_after_upload", False)),
             ftp_make_vrf_files=bool(d.get("ftp_make_vrf_files", False)),
-
         )
-
-
-# --------------------- Outlook + state helpers ---------------------
-# --- NEW: transmit time extraction (raw ISO kept; no timezone conversion) --
-TRANSMIT_TIME_RE = re.compile(
-    r"(?im)^\s*(?:Transmit|Transit)\s+Time\s*:\s*"
-    r"(?P<iso>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)"
-    r"(?:\s*UTC)?\s*$"
-)
-
-
-def _iso_to_ts12_no_tz(iso: str) -> str:
-    """
-    Turn 'YYYY-MM-DDTHH:MM:SS[Z|±HH:MM]' into YYMMDDHHMMSS (string formatting only).
-    No timezone math is performed.
-    """
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})", (iso or "").strip())
-    if not m:
-        return ""
-    y, M, d, h, m_, s = m.groups()
-    return f"{y[2:]}{M}{d}{h}{m_}{s}"
-
-def _extract_transmit_time_from_body(body: str) -> tuple[str, str]:
-    """
-    Returns (transmit_iso, transmit_ts12). If not found, both are ''.
-    Example body line: 'Transmit Time: 2025-10-01T15:23:58Z UTC'
-    """
-    if not body:
-        return "", ""
-    m = TRANSMIT_TIME_RE.search(body)
-    if not m:
-        return "", ""
-    iso = m.group("iso").strip()
-    ts12 = _iso_to_ts12_no_tz(iso)
-    return iso, ts12
 
 
 def _parse_local_dt(s: str) -> Optional[datetime]:
     s = (s or "").strip()
-    if not s: return None
+    if not s:
+        return None
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except Exception:
@@ -418,15 +462,16 @@ def _http_get_json(url: str, headers: Dict[str, str], params: Dict[str, str]) ->
 
 def _parse_iso_to_local_str(s: str) -> str:
     """
-    Accepts 'YYYY-MM-DDTHH:MM:SSZ' or with offset; returns '%Y-%m-%d %H:%M:%S'
-    Falls back to UTC now if parsing fails.
+    Accepts 'YYYY-MM-DDTHH:MM:SSZ' or with offset; returns local
+    '%Y-%m-%d %H:%M:%S' (naive). Falls back to local now if parsing fails.
     """
     try:
-        from datetime import timezone
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        local = dt.astimezone()  # system local tz
+        return local.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
-        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def _webhook_iter_messages(cfg: EmailParserConfig, folder_tag: str, dt_cutoff: Optional[datetime], logger: Optional[Callable[[str], None]]) -> List["_MailRecord"]:
     """
@@ -626,8 +671,6 @@ def _open_state_db(state_dir: str, parser_name: str) -> sqlite3.Connection:
     return conn
 
 
-
-
 def _get_checkpoint(conn: sqlite3.Connection, folder_tag: str) -> str:
     cur = conn.cursor()
     cur.execute("SELECT last_received FROM checkpoints WHERE folder_tag=? LIMIT 1", (folder_tag,))
@@ -666,7 +709,11 @@ def _mark_processed_id(conn: sqlite3.Connection, folder_tag: str, entry_id: str)
     if not entry_id:
         return
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO processed_messages(folder_tag, entry_id) VALUES(?,?)", (folder_tag, entry_id))
+    cur.execute(
+        "INSERT OR IGNORE INTO processed_messages(folder_tag, entry_id) VALUES(?,?)",
+        (folder_tag, entry_id),
+    )
+
 
 
 def _get_sender_email(msg) -> str:
@@ -766,55 +813,7 @@ def list_outlook_folder_paths(mailbox_name: str, max_depth: int = 6, max_count: 
     return paths
 
 
-# --------------------- Lookup helpers ---------------------
-
-def _lookup_timestamp_field(lookup: Dict[str, Any]) -> str:
-    """Return the configured timestamp field from lookup (S.emit_d or root)."""
-    if not isinstance(lookup, dict):
-        return ""
-    s_emit = (lookup.get("S") or {}).get("emit_d") or {}
-    val = str(s_emit.get("timestamp_field", "") or "")
-    if not val:
-        val = str(lookup.get("timestamp_field", "") or "")
-    return val
-
-
-def _lookup_uses_transmit_time(lookup: Dict[str, Any]) -> bool:
-    """
-    True if we should use the raw transmit time from the email body.
-    Accepted (case/spacing doesn't matter): transmit_time, transmit_ts12, transit_time, transit_ts12, tx, tx_ts12, with optional leading 'input '.
-    """
-    raw = _lookup_timestamp_field(lookup)
-    key = re.sub(r"[^a-z0-9]+", "", (raw or "").lower())
-    accepted = {
-        "transmittime", "transmitts12",
-        "transittime",  "transitts12",   # common typo supported
-        "tx", "txts12",
-        "inputtransmittime", "inputtransmitts12",
-        "inputtransittime",  "inputtransitts12",
-        "inputtx", "inputtxts12",
-    }
-    return key in accepted
-
-
-def _lookup_uses_transmit_last10(lookup: Dict[str, Any]) -> bool:
-    """
-    True if we should use the transmit time floored to the previous 10-min mark.
-    Accepted: transmit_last10min, transmit_prev10, transmit_previous10min,
-              transit_last10min, tx_last10min (+ 'input ' variants).
-    """
-    raw = _lookup_timestamp_field(lookup)
-    key = re.sub(r"[^a-z0-9]+", "", (raw or "").lower())
-    accepted = {
-        "transmitlast10min", "transmitprev10", "transmitprevious10min",
-        "transitlast10min",  "txlast10min",
-        "inputtransmitlast10min", "inputtransmitprev10", "inputtransmitprevious10min",
-        "inputtransitlast10min",  "inputtxlast10min",
-    }
-    return key in accepted
-
-
-
+# --------------------- Lookup helpers --------------------
 def _load_lookup_bundle(lookup_path: str, sender_email: str, logger: Optional[Callable[[str], None]]) -> Dict[str, Any]:
     """
     Returns a bundle per sender with format-specific config:
@@ -824,8 +823,9 @@ def _load_lookup_bundle(lookup_path: str, sender_email: str, logger: Optional[Ca
       "D": { "label_map": {"Battery":"Volt", ...}, "prefix":"F5", "columns":[...](optional) }
     }
     """
+
     def log(msg: str):
-        if logger and not getattr(lookup_path, "quiet", False):
+        if logger:
             logger(msg)
 
     defaults = {
@@ -871,7 +871,6 @@ def _load_lookup_bundle(lookup_path: str, sender_email: str, logger: Optional[Ca
         return defaults
     except Exception:
         return defaults
-
 
 
 def _normalize_lookup_payload(entry: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
@@ -977,65 +976,16 @@ def _table_name_from_path(path: List[str]) -> str:
     return re.sub(r"\W+", "_", s) or "inbox"
 
 
-# --------------------- Time & name tokens ---------------------
-def _ymd(dt_str: str) -> str:
-    if not dt_str:
-        return datetime.utcnow().strftime("%Y%m%d")
-    try:
-        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d")
-    except Exception:
-        return datetime.utcnow().strftime("%Y%m%d")
-
-
-def _hms(dt_str: str) -> str:
-    if not dt_str:
-        return datetime.utcnow().strftime("%H%M%S")
-    try:
-        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").strftime("%H%M%S")
-    except Exception:
-        return datetime.utcnow().strftime("%H%M%S")
-
-
-def _datetime_token(received_time: str) -> str:
-    return _ymd(received_time) + _hms(received_time)
-
-
-def _week_key(dt_str: str) -> Tuple[int, int]:
-    try:
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        dt = datetime.utcnow()
-    iso = dt.isocalendar()
-    return (iso[0], iso[1])
-
-
-def _month_key(dt_str: str) -> Tuple[int, int]:
-    try:
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        dt = datetime.utcnow()
-    return (dt.year, dt.month)
-
-
+# --------------------- Minimized token helpers kept in core ---------------------
 def _sanitize_slug(s: str) -> str:
     s = (s or "unknown").strip().replace("@", "_at_")
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", s) or "unknown"
 
-
-def _format_date_token(granularity: str, received_time: str) -> str:
-    if granularity in ("email", "day"):
-        return _ymd(received_time)
-    if granularity == "week":
-        y, w = _week_key(received_time)
-        return f"{y}_W{int(w):02d}"
-    if granularity == "month":
-        y, m = _month_key(received_time)
-        return f"{y}{int(m):02d}"
-    return _ymd(received_time)
-
-
-# ---------- Payload timestamp + filename composer ----------
 def _extract_payload_datetime_token(tokens: List[str]) -> str:
+    """
+    Finds the first ts-like token (12+ digits or with _counter suffix) in an S/D payload list.
+    Used only as a hint for filename tokens; final payload timestamp comes from timeshifter.
+    """
     def head_before_underscore(s: str) -> str:
         s = s.strip()
         return s.split("_", 1)[0]
@@ -1058,283 +1008,7 @@ def _extract_payload_datetime_token(tokens: List[str]) -> str:
     return ""
 
 
-def _yymmddhhmm_from_received(received_time: str) -> str:
-    try:
-        dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        dt = datetime.utcnow()
-    return dt.strftime("%y%m%d%H%M")
-
-
-def _normalize_ts_len12(ts: str) -> str:
-    s = re.sub(r"\D+", "", str(ts or ""))
-    if len(s) < 12:
-        s = s + ("0" * (12 - len(s)))
-    if len(s) > 12:
-        s = s[:12]
-    return s
-
-def _floor_prev_10min_ts12(ts12: str) -> str:
-    """
-    Floor a YYMMDDHHMMSS string to the previous 10-minute mark with SS=00.
-    Works by string math only (no timezone handling).
-    """
-    s = re.sub(r"\D+", "", ts12 or "")
-    if len(s) < 12:
-        s = (s + "000000000000")[:12]
-    # s = YY MM DD HH MM SS
-    try:
-        mm = int(s[8:10])
-    except Exception:
-        mm = 0
-    mm = (mm // 10) * 10
-    return s[:8] + f"{mm:02d}" + "00"
-
-def _floor_prev_10min_dt(dt: datetime) -> datetime:
-    try:
-        return dt.replace(minute=(dt.minute // 10) * 10, second=0, microsecond=0)
-    except Exception:
-        return dt
-
-
-
-def _ts12_parts(ts12: str) -> tuple[int,int,int,int,int,int]:
-    s = re.sub(r"\D+", "", ts12 or "")
-    s = (s + "000000000000")[:12]
-    yy = 2000 + int(s[0:2])   # assume 20YY
-    mo = int(s[2:4])
-    dd = int(s[4:6])
-    hh = int(s[6:8])
-    mi = int(s[8:10])
-    ss = int(s[10:12])
-    return yy, mo, dd, hh, mi, ss
-
-def _ts12_from_dt(dt: datetime) -> str:
-    return dt.strftime("%y%m%d%H%M%S")
-
-def _floor_prev_nmin_ts12(ts12: str, n: int) -> str:
-    try:
-        yy, mo, dd, hh, mi, ss = _ts12_parts(ts12)
-        dt = datetime(yy, mo, dd, hh, mi, ss).replace(second=0, microsecond=0)
-        floored = dt.replace(minute=(dt.minute // max(1, n)) * max(1, n))
-        return _ts12_from_dt(floored)
-    except Exception:
-        # fallback to previous behavior for 10
-        return _floor_prev_10min_ts12(ts12)
-
-def _ceil_next_nmin_ts12(ts12: str, n: int) -> str:
-    try:
-        yy, mo, dd, hh, mi, ss = _ts12_parts(ts12)
-        dt = datetime(yy, mo, dd, hh, mi, ss).replace(second=0, microsecond=0)
-        step = max(1, n)
-        if dt.minute % step == 0 and ss == 0:
-            rounded = dt  # already on boundary
-        else:
-            q = (dt.minute // step + 1) * step
-            if q >= 60:
-                rounded = dt.replace(minute=0) + _td(hours=1)
-            else:
-                rounded = dt.replace(minute=q)
-        return _ts12_from_dt(rounded)
-    except Exception:
-        # fallback: snap to nearest 10 up
-        base = _floor_prev_10min_ts12(ts12)
-        yy, mo, dd, hh, mi, ss = _ts12_parts(base)
-        dt = datetime(yy, mo, dd, hh, mi, ss) + _td(minutes=10)
-        return _ts12_from_dt(dt)
-
-
-
-
-def _received_prev10_ts12_from_received_time(received_time: str) -> str:
-    """
-    Take 'YYYY-MM-DD HH:MM:SS', floor to previous 10 min,
-    and return 12-digit YYMMDDHHMMSS (SS=00).
-    """
-    try:
-        dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        dt = datetime.utcnow()
-    floored = _floor_prev_10min_dt(dt)
-    return floored.strftime("%y%m%d%H%M") + "00"
-
-# Build extra filename tokens (merged with any payload-derived tokens)
-def _make_filename_extra_tokens(received_time: str, base_extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Provides tokens usable in filename patterns:
-      (received_last10min) / (received_last10_min) / (use_nearest_10_min) / (use_nearest_10min)
-      → YYMMDDHHMMSS snapped to previous 10-min mark.
-    """
-    extra = dict(base_extra or {})
-    ts12 = _received_prev10_ts12_from_received_time(received_time)
-    # canonical + common aliases (case-insensitive match later)
-    extra.setdefault("received_last10min", ts12)
-    extra.setdefault("received_last10_min", ts12)
-    extra.setdefault("use_nearest_10_min", ts12)
-    extra.setdefault("use_nearest_10min", ts12)
-    extra.setdefault("recieved_last10min", ts12)  # legacy
-    return extra
-
-
-
-def _round_nearest_10min_dt(dt: datetime) -> datetime:
-    """Round to the nearest 10-minute mark; .5 up (i.e., 5..14 -> 10, 15..24 -> 20, etc.)."""
-    try:
-        m = dt.minute
-        q = int(round(m / 10.0)) * 10
-        # handle 60 → bump hour, set minute to 0
-        if q == 60:
-            from datetime import timedelta as _td
-            dt = (dt.replace(minute=0, second=0, microsecond=0) + _td(hours=1))
-        else:
-            dt = dt.replace(minute=q, second=0, microsecond=0)
-        return dt
-    except Exception:
-        return dt
-
-def _received_nearest10_ts12_from_received_time(received_time: str) -> str:
-    """
-    Take 'YYYY-MM-DD HH:MM:SS', round to the nearest 10 min,
-    and return 12-digit YYMMDDHHMMSS (SS=00).
-    """
-    try:
-        dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        dt = datetime.utcnow()
-    rounded = _round_nearest_10min_dt(dt)
-    return rounded.strftime("%y%m%d%H%M") + "00"
-
-
-def _compose_filename_tokens(
-    pattern_str: str,
-    *,
-    granularity: str,
-    received_time: str,
-    sender_email: str,
-    folder_tag: str,
-    payload_date_time: str,
-    ext: str,
-    extra_tokens: Optional[Dict[str, Any]] = None,
-) -> str:
-    g = (granularity or "day").lower()
-    if g not in {"email", "day", "week", "month"}:
-        g = "day"
-
-    date_key = _format_date_token(g, received_time)
-    time_key = _hms(received_time)
-    datetime_key = _datetime_token(received_time)
-
-    pdt_val = _normalize_ts_len12((payload_date_time or "").strip())
-    if not pdt_val:
-        pdt_val = _yymmddhhmm_from_received(received_time) + "00"
-
-    if g != "email":
-        time_val = date_key
-        datetime_val = date_key
-    else:
-        time_val = time_key
-        datetime_val = datetime_key
-
-    base_tokens_ci: Dict[str, str] = {
-        "payload_datetime": pdt_val,
-        "payload_date_time": pdt_val,
-        "date": date_key,
-        "time": time_val,
-        "datetime": datetime_val,
-        "sender": _sanitize_slug(sender_email),
-        "folder": _sanitize_slug(folder_tag),
-    }
-
-    extra_ci: Dict[str, str] = {}
-    if extra_tokens:
-        for k, v in extra_tokens.items():
-            if k is None:
-                continue
-            key_str = str(k)
-            val_str = "" if v is None else str(v)
-            extra_ci[key_str.lower()] = val_str
-            extra_ci[_sanitize_col_name(key_str).lower()] = val_str
-
-    # Any "time-ish" token?
-    has_timeish = bool(re.search(
-        r"\(\s*(payload_?date_?time|time|datetime|received_?(?:first|last)\d+(?:_?min)?|use_?nearest_?10_?min|rec[e|ie]ved_?last10min|"
-        r"transm(?:it|it_?)?(?:_?time|_?ts12|_?iso)?|trans(?:it|mit)_?(?:first|last)\d+(?:_?min)?)\s*\)",
-        pattern_str or "", flags=re.IGNORECASE,
-    ))
-
-    def rx_round(kind: str, minutes: int) -> str:
-        # kind: 'first' | 'last'
-        try:
-            dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S").replace(second=0, microsecond=0)
-        except Exception:
-            dt = datetime.utcnow().replace(second=0, microsecond=0)
-        step = max(1, int(minutes))
-        if kind == "last":
-            dt = dt.replace(minute=(dt.minute // step) * step)
-        else:
-            if dt.minute % step == 0:
-                pass
-            else:
-                q = (dt.minute // step + 1) * step
-                if q >= 60:
-                    dt = dt.replace(minute=0) + _td(hours=1)
-                else:
-                    dt = dt.replace(minute=q)
-        return dt.strftime("%y%m%d%H%M") + "00"
-
-    def tx_round(kind: str, minutes: int) -> str:
-        tx = extra_ci.get("transmit_ts12") or extra_ci.get("transit_ts12") or ""
-        if not tx:
-            return ""
-        if kind == "last":
-            return _floor_prev_nmin_ts12(tx, minutes)
-        return _ceil_next_nmin_ts12(tx, minutes)
-
-    def _repl(m: re.Match) -> str:
-        key_raw = (m.group(1) or "").strip()
-        key = key_raw.lower()
-
-        # direct knowns
-        if key in base_tokens_ci:
-            return base_tokens_ci[key]
-        if key in extra_ci:
-            return extra_ci[key]
-
-        # dynamic received_*first/lastN
-        mr = re.match(r"^received_(first|last)\s*(\d+)(?:_?min)?$", key)
-        if mr:
-            return rx_round(mr.group(1), int(mr.group(2)))
-
-        # dynamic transmit_*first/lastN
-        mt = re.match(r"^(?:transmit|transit|tx)_(first|last)\s*(\d+)(?:_?min)?$", key)
-        if mt:
-            return tx_round(mt.group(1), int(mt.group(2)))
-
-        # legacy received_last10 aliases
-        if key in {"received_last10min", "recieved_last10min", "use_nearest_10_min", "use_nearest_10min"}:
-            return rx_round("last", 10)
-
-        # raw transmit time aliases
-        if key in {"transmit_time", "transmit_ts12", "transmit_iso", "transit_time", "transit_ts12"}:
-            return extra_ci.get(key, "")
-
-        return ""
-
-    replaced = re.sub(r"\(([^)]+)\)", _repl, pattern_str or "")
-
-    if g == "email" and not has_timeish:
-        replaced = f"{replaced}_{_hms(received_time)}"
-
-    replaced = replaced.replace(" ", "_")
-    replaced = re.sub(r"[^A-Za-z0-9_.-]+", "_", replaced)
-    replaced = re.sub(r"_+", "_", replaced).strip("._")
-
-    base = replaced or (base_tokens_ci["date"] or "file")
-    return f"{base}{ext}"
-
-
-
-# --------------- Dedupe keys (DB and file modes) ---------------
+# --------------------- Dedupe keys (DB and file modes) ---------------------
 def _get_entry_id(msg) -> str:
     try:
         eid = getattr(msg, "EntryID", "") or ""
@@ -1535,7 +1209,7 @@ def _build_row_for_D(
         if i_hash + 2 < len(tokens):
             tag_val = tokens[i_hash + 2].strip()
 
-    # ── NEW: capture K1/M2 tokens for use in CSV rows and filename tokens ──
+    # Capture K1/M2 tokens for use in CSV rows and filename tokens
     k1_val = ""
     m2_val = ""
     if i_hash >= 0:
@@ -1544,9 +1218,6 @@ def _build_row_for_D(
             k1_val = tokens[i_hash + 3].strip()
         if i_hash + 5 < len(tokens):
             m2_val = tokens[i_hash + 5].strip()
-    # ───────────────────────────────────────────────────────────────────────
-
-    # ───────────────────────────────────────────────────────────────────────
 
     ts_token = ""
     if i_hash >= 0 and (i_hash + 7) < len(tokens):
@@ -1558,7 +1229,7 @@ def _build_row_for_D(
             if re.fullmatch(r"\d{6,}", t.strip()):
                 ts_token = t.strip()
                 break
-    payload_dt = _normalize_ts_len12(ts_token)
+    payload_dt = normalize_ts_len12(ts_token)
 
     kv_start = (i_hash + 8) if (i_hash >= 0 and (i_hash + 7) < len(tokens)) else len(tokens)
 
@@ -1572,13 +1243,10 @@ def _build_row_for_D(
         present.setdefault("XYZ", xyz_val)
     if tag_val:
         present.setdefault("TAG", tag_val)
-
-    # ── NEW: expose K1/M2 into the row map (and thus into filename tokens) ──
     if k1_val:
         present.setdefault("K1", k1_val)
     if m2_val:
         present.setdefault("M2", m2_val)
-    # ───────────────────────────────────────────────────────────────────────
 
     extras = [k for k in present.keys() if k not in preferred]
     headers = _uniquify(preferred + extras)
@@ -1587,7 +1255,6 @@ def _build_row_for_D(
 
     logger_display = prefix
     return headers, data_map, logger_display, payload_dt
-
 
 
 # --------------------- TXT helpers ---------------------
@@ -1616,37 +1283,6 @@ def _emit_get(emit: Dict[str, Any], base_key: str, s_map: Dict[str, Any], defaul
     return "" if default is None else str(default)
 
 
-def _lookup_uses_received_last10(lookup: Dict[str, Any]) -> bool:
-    """
-    True if the lookup asks to use received time rounded to a 10-minute mark.
-    Accepts any of these (case/spacing doesn’t matter):
-      recieved_last10min, received_last10min, use_nearest_10_min, use_nearest_10min
-      and with optional leading "input " (e.g., "input use_nearest_10_min").
-    """
-    def pick_ts_field(src: Dict[str, Any]) -> str:
-        if not isinstance(src, dict):
-            return ""
-        s_emit = (src.get("S") or {}).get("emit_d") or {}
-        val = str(s_emit.get("timestamp_field", "") or "")
-        if not val:
-            val = str(src.get("timestamp_field", "") or "")
-        return val.strip().lower()
-
-    raw = pick_ts_field(lookup)
-    # normalize: remove non-alphanumerics so "input use_nearest_10min" -> "inputusenearest10min"
-    key = re.sub(r"[^a-z0-9]+", "", raw)
-    return key in {
-        "recievedlast10min",   # legacy misspelling
-        "receivedlast10min",
-        "usenearest10min",
-        "inputusenearest10min",
-        "usenearest10min",     # covers both _10_min and _10min once normalized
-        "inputreceivedlast10min",
-        "inputrecievedlast10min",
-    }
-
-
-
 def _compose_d_from_s_line(tokens: List[str], lookup: Dict[str, Any], missing: str) -> str:
     _, s_map, _logger_display, payload_dt = _build_row_for_S(tokens, lookup, missing)
     lookup_S = lookup.get("S", {})
@@ -1666,7 +1302,7 @@ def _compose_d_from_s_line(tokens: List[str], lookup: Dict[str, Any], missing: s
     ts_raw = s_map.get(ts_src, "") if ts_src else ""
     if not ts_raw:
         ts_raw = payload_dt
-    ts12 = _normalize_ts_len12(ts_raw)
+    ts12 = normalize_ts_len12(ts_raw)
 
     k1 = _emit_get(emit, "k1", s_map, default="K1")
     m2 = _emit_get(emit, "m2", s_map, default="M2")
@@ -1703,136 +1339,49 @@ def _compose_txt_payload_line(
     transmit_ts12: str = "",
 ) -> str:
     """
-    Build one export line. Timestamp override precedence (highest first):
-      1) transmit_last10min  → floor TX time to previous 10-min mark (SS=00)
-      2) transmit time exact → use TX time as-is
-      3) received_last10min  → floor RECEIVED time to previous 10-min mark (SS=00)
-      4) default             → as composed (payload timestamp or received time)
-
-    Works for both inbound #S and #D payloads.
+    Build one export line. Timestamp override is delegated to timeshifter.compute_effective_payload_ts12
+    so both inbound #D and S→D behave identically.
     """
-    # If inbound is already #D, copy through and optionally override timestamp at index 9.
+
     if tag == "D":
+        # copy as-is, then replace the timestamp column (if we can find it)
         line = "#D," + ",".join(tokens + ["**"])
         parts = line.split(",")
-        if len(parts) >= 10 and parts[0] == "#D":
-            ts_idx = 9
-            ts_val = parts[ts_idx]
 
-            ts_spec = _lookup_timestamp_field(lookup)
-            base_key, inline_min = parse_timeish_expr(ts_spec)
+        t_idx = find_ts_idx_in_D_tokens(tokens)   # token index
+        csv_idx = (t_idx + 1) if t_idx >= 0 else -1  # parts has '#D' prefix
 
-            # default to existing ts_val as composed earlier
-            choose = (base_key or "").lower()
+        if 0 < csv_idx < len(parts):
+            current = parts[csv_idx]
+            new_ts = compute_effective_payload_ts12(
+                tag=tag,
+                received_time=received_time,
+                transmit_ts12=transmit_ts12,
+                lookup=lookup,
+                cfg=cfg,
+                current_ts12=current,
+            )
+            if new_ts:
+                parts[csv_idx] = new_ts
+        return ",".join(parts)
 
-            # TX based
-            m_tx = re.match(r"^tx_(first|last)(\d+)$", choose)
-            if choose == "tx" and transmit_ts12:
-                ts_val = transmit_ts12
-            elif m_tx and transmit_ts12:
-                which = m_tx.group(1)
-                minutes = int(m_tx.group(2))
-                ts_val = _ceil_next_nmin_ts12(transmit_ts12, minutes) if which == "first" else _floor_prev_nmin_ts12(
-                    transmit_ts12, minutes)
-
-            # RX based
-            m_rx = re.match(r"^rx_(first|last)(\d+)$", choose)
-            if m_rx:
-                which = m_rx.group(1)
-                minutes = int(m_rx.group(2))
-                if which == "first":
-                    # round up received_time
-                    try:
-                        dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S").replace(second=0, microsecond=0)
-                    except Exception:
-                        dt = datetime.utcnow().replace(second=0, microsecond=0)
-                    step = max(1, minutes)
-                    if dt.minute % step != 0:
-                        q = (dt.minute // step + 1) * step
-                        if q >= 60:
-                            dt = dt.replace(minute=0) + _td(hours=1)
-                        else:
-                            dt = dt.replace(minute=q)
-                    ts_val = dt.strftime("%y%m%d%H%M") + "00"
-                else:
-                    ts_val = _received_prev10_ts12_from_received_time(received_time) if minutes == 10 else (
-                        # generic floor for arbitrary N
-                        (lambda _dt: (_dt.replace(minute=(_dt.minute // max(1, minutes)) * max(1, minutes), second=0,
-                                                  microsecond=0)).strftime("%y%m%d%H%M") + "00")(
-                            datetime.strptime(received_time,
-                                              "%Y-%m-%d %H:%M:%S") if received_time else datetime.utcnow()
-                        )
-                    )
-
-            # else: keep the D-line’s own timestamp
-
-            # Apply the inline +HH:MM / -HH:MM from lookup (if any)
-            if inline_min:
-                ts_val = shift_ts12_minutes(ts_val, inline_min)
-
-            # THEN apply the global payload shift (GUI toggle)
-            parts[ts_idx] = apply_payload_shift_if_enabled(cfg, ts_val)
-            return ",".join(parts)
-        return line
-
-    # S -> D
+    # S → canonical #D
     line = _compose_d_from_s_line(tokens, lookup, missing)
     parts = line.split(",")
     if len(parts) >= 10 and parts[0] == "#D":
-        ts_idx = 9
-        ts_val = parts[ts_idx]
-
-        ts_spec = _lookup_timestamp_field(lookup)
-        base_key, inline_min = parse_timeish_expr(ts_spec)
-
-        # default to existing ts_val as composed earlier
-        choose = (base_key or "").lower()
-
-        # TX based
-        m_tx = re.match(r"^tx_(first|last)(\d+)$", choose)
-        if choose == "tx" and transmit_ts12:
-            ts_val = transmit_ts12
-        elif m_tx and transmit_ts12:
-            which = m_tx.group(1)
-            minutes = int(m_tx.group(2))
-            ts_val = _ceil_next_nmin_ts12(transmit_ts12, minutes) if which == "first" else _floor_prev_nmin_ts12(
-                transmit_ts12, minutes)
-
-        # RX based
-        m_rx = re.match(r"^rx_(first|last)(\d+)$", choose)
-        if m_rx:
-            which = m_rx.group(1)
-            minutes = int(m_rx.group(2))
-            if which == "first":
-                # round up received_time
-                try:
-                    dt = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S").replace(second=0, microsecond=0)
-                except Exception:
-                    dt = datetime.utcnow().replace(second=0, microsecond=0)
-                step = max(1, minutes)
-                if dt.minute % step != 0:
-                    q = (dt.minute // step + 1) * step
-                    if q >= 60:
-                        dt = dt.replace(minute=0) + _td(hours=1)
-                    else:
-                        dt = dt.replace(minute=q)
-                ts_val = dt.strftime("%y%m%d%H%M") + "00"
-            else:
-                ts_val = _received_prev10_ts12_from_received_time(received_time) if minutes == 10 else (
-                    # generic floor for arbitrary N
-                    (lambda _dt: (_dt.replace(minute=(_dt.minute // max(1, minutes)) * max(1, minutes), second=0,
-                                              microsecond=0)).strftime("%y%m%d%H%M") + "00")(
-                        datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S") if received_time else datetime.utcnow()
-                    )
-                )
-
-        # Apply the inline +HH:MM / -HH:MM from lookup (if any)
-        if inline_min:
-            ts_val = shift_ts12_minutes(ts_val, inline_min)
-
-        # THEN the global payload shift (GUI toggle)
-        parts[ts_idx] = apply_payload_shift_if_enabled(cfg, ts_val)
+        current = parts[9]  # ts12 lives here in canonical D lines
+        new_ts = compute_effective_payload_ts12(
+            tag="S",
+            received_time=received_time,
+            transmit_ts12=transmit_ts12,
+            lookup=lookup,
+            cfg=cfg,
+            current_ts12=current,
+        )
+        if new_ts:
+            parts[9] = new_ts
         return ",".join(parts)
+
     return line
 
 
@@ -1863,7 +1412,6 @@ def _write_payload_txt_line(path: str, line: str):
         f.write((line or "") + "\n")
 
 
-
 def _ensure_vrf_for_txt(txt_path: str) -> str:
     """
     Make an empty .vrf file next to the given .txt file and return its path.
@@ -1878,9 +1426,19 @@ def _ensure_vrf_for_txt(txt_path: str) -> str:
     return vrf_path
 
 
-
 # --------------------- Runner ---------------------
 def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+    def log(msg: str):
+        if getattr(cfg, "quiet", True):
+            return
+        if logger:
+            logger(msg)
+
+    # Normalize once per run (covers live GUI edits)
+    normalize_time_shifts_inplace(cfg)
+
+    fmt = (cfg.output_format or "db").lower()
+
     """
     Fast run WITHOUT Outlook.Restrict:
       • Sort newest→oldest, compute cutoff = checkpoint − lookback_hours, and STOP when older.
@@ -1895,13 +1453,7 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
           - Optional overrides: Transmit Time (exact, no tz math) or received time floored to previous 10 minutes.
       • Optional FTP upload (FTP or FTPS). Enable local output, FTP output, or both.
     """
-    def log(msg: str):
-        if getattr(cfg, "quiet", True):
-            return
-        if logger:
-            logger(msg)
 
-    fmt = (cfg.output_format or "db").lower()
     if fmt == "db":
         if not cfg.db_path:
             raise ValueError("EmailParserConfig.db_path is empty.")
@@ -2042,7 +1594,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                     dt_cutoff = dt_manual_from
                     try:
                         dt_chk = datetime.strptime(last_checkpoint, "%Y-%m-%d %H:%M:%S")
-                        from datetime import timedelta as _td
                         dt_look = dt_chk - _td(hours=max(0, int(cfg.lookback_hours or 0)))
                         if dt_look > dt_cutoff:
                             dt_cutoff = dt_look
@@ -2054,7 +1605,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 if last_checkpoint:
                     try:
                         dt_chk = datetime.strptime(last_checkpoint, "%Y-%m-%d %H:%M:%S")
-                        from datetime import timedelta as _td
                         dt_cutoff = dt_chk - _td(hours=max(0, int(cfg.lookback_hours or 0)))
                         log(f"Cutoff from checkpoint {dt_chk:%Y-%m-%d %H:%M:%S} with lookback {cfg.lookback_hours}h → {dt_cutoff:%Y-%m-%d %H:%M:%S}")
                     except Exception as e:
@@ -2082,7 +1632,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 try:
                     folder = resolve_folder_path(mailbox, path)
                 except Exception as e:
-                    reason = "folder_not_found"
                     log(f"Folder not found: {cfg.mailbox} > " + " > ".join(path) + f" ({e})")
                     results[" > ".join(path)] = {"inserted": 0, "skipped": 1}
                     continue
@@ -2097,15 +1646,10 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 except Exception:
                     pass
 
-            if use_webhook:
-                count = len(messages)
-            else:
-                try:
-                    count = items.Count
-                except Exception:
-                    count = -1
+            iterable = messages if use_webhook else items
+            count = len(messages) if use_webhook else getattr(items, "Count", -1)
             source_label = "WEBHOOK" if use_webhook else cfg.mailbox
-            log(f"Scanning {source_label} > " + " > ".join(path) + (f" | {count} items" if count >= 0 else ""))
+            log(f"Scanning {source_label} > " + " > ".join(path) + (f" | {count} items" if isinstance(count, int) and count >= 0 else ""))
 
             inserted = 0
             skipped_total = 0
@@ -2117,8 +1661,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             gran = (cfg.file_granularity or "day").lower()
             if gran not in {"email", "day", "week", "month"}:
                 gran = "day"
-
-            iterable = messages if use_webhook else items
 
             for msg in iterable:
                 exported_any_for_message = False
@@ -2169,8 +1711,8 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         if (max_received_seen is None) or (received_time > max_received_seen):
                             max_received_seen = received_time
 
-                    # --- NEW: parse Transmit Time from the email body (if present) ---
-                    tx_iso, tx_ts12 = _extract_transmit_time_from_body(body)
+                    # Parse Transmit Time from the email body (if present)
+                    tx_iso, tx_ts12 = extract_transmit_time_from_body(body)
                     tx_tokens: Dict[str, str] = {}
                     if tx_iso or tx_ts12:
                         tx_tokens = {
@@ -2192,7 +1734,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         for cand in _find_encoded_payload_candidates(body):
                             decoded = _maybe_decode_compressed_payload(cand)
                             if decoded:
-                                # Append the decoded line to the body so the rest of the pipeline remains unchanged
                                 body = (body or "").rstrip() + "\n" + decoded + "\n"
                                 payloads = _iter_payload_lines(body)
                                 break
@@ -2230,10 +1771,10 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                             else:
                                 # Compose filename, merging transmit-time tokens if present
                                 pdt_for_name = ""
-                                if fmt == "txt" and _lookup_uses_received_last10(lookup):
-                                    pdt_for_name = _received_prev10_ts12_from_received_time(received_time)
+                                if fmt == "txt" and lookup_uses_received_last10(lookup):
+                                    pdt_for_name = received_prev10_ts12_from_received_time(received_time)
 
-                                extra_for_name = _make_filename_extra_tokens(received_time, tx_tokens)
+                                extra_for_name = make_filename_extra_tokens(received_time, tx_tokens)
                                 out_name = compose_filename_tokens(
                                     cfg.filename_pattern,
                                     granularity=gran,
@@ -2246,6 +1787,10 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                                     apply_shift=getattr(cfg, "shift_filename_time", False),
                                     shift_hhmm=getattr(cfg, "filename_time_shift", ""),
                                     shift_minutes=getattr(cfg, "filename_time_shift_minutes", 0),
+                                    apply_tz=(getattr(cfg, "shift_filename_time", False) and getattr(cfg,
+                                                                                                     "use_timezone_shift",
+                                                                                                     False)),
+                                    tz_name=getattr(cfg, "timezone_name", ""),
                                 )
 
                                 out_path = os.path.join(dest_dir, out_name)
@@ -2255,18 +1800,22 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                                     _write_row_csv(out_path, headers_for_row, row, write_header_if_new=not os.path.exists(out_path))
                                 elif fmt == "txt":
                                     # Choose timestamp for the S→empty line:
-                                    if _lookup_uses_transmit_time(lookup) and tx_ts12:
+                                    if lookup_uses_transmit_time(lookup) and tx_ts12:
                                         ts12 = tx_ts12
-                                    elif _lookup_uses_transmit_last10(lookup) and tx_ts12:
-                                        ts12 = _floor_prev_10min_ts12(tx_ts12)
-                                    elif _lookup_uses_received_last10(lookup):
-                                        ts12 = _received_prev10_ts12_from_received_time(received_time)
+                                    elif lookup_uses_transmit_last10(lookup) and tx_ts12:
+                                        ts12 = compute_effective_payload_ts12(
+                                            tag="S", received_time=received_time, transmit_ts12=tx_ts12,
+                                            lookup={"timestamp_field": "tx_last10"}, cfg=cfg,
+                                            current_ts12=yymmddhhmm_from_received(received_time) + "00",
+                                        )
+                                    elif lookup_uses_received_last10(lookup):
+                                        ts12 = received_prev10_ts12_from_received_time(received_time)
                                     else:
-                                        ts12 = _yymmddhhmm_from_received(received_time) + "00"
+                                        ts12 = yymmddhhmm_from_received(received_time) + "00"
 
                                     _write_payload_txt_line(out_path, f"#S,{ts12},EMPTY,**")
 
-                                    # make matching .vrf if requested (TXT + FTP only) required for data link to read things "live"
+                                    # make matching .vrf if requested (TXT + FTP only)
                                     if cfg.use_ftp_output and getattr(cfg, "ftp_make_vrf_files", False):
                                         vrf_path = _ensure_vrf_for_txt(out_path)
                                         touched_files_per_folder[folder_tag].add(vrf_path)
@@ -2295,9 +1844,23 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         if first_payload_extra_tokens is None:
                             first_payload_extra_tokens = dict(data_map)
                             first_payload_dt = payload_dt or ""
+
+                            # NEW: expose lookup prefixes for filename patterns
+                            s_prefix = (lookup.get("S") or {}).get("prefix", "")
+                            d_prefix = (lookup.get("D") or {}).get("prefix", "")
+
+                            # Generic token everyone can use: (prefix)
+                            if tag == "S":
+                                first_payload_extra_tokens.setdefault("prefix", s_prefix)
+                            else:
+                                first_payload_extra_tokens.setdefault("prefix", d_prefix)
+
+                            # Optional: expose both for completeness
+                            first_payload_extra_tokens.setdefault("s_prefix", s_prefix)
+                            first_payload_extra_tokens.setdefault("d_prefix", d_prefix)
+
                             if tx_tokens:
                                 first_payload_extra_tokens.update(tx_tokens)
-
 
                         values_for_hash = [data_map.get(h, "") for h in headers_for_row]
                         dedupe_key = _make_dedupe_key(use_entry_id, subject, sender_email or sender_name, received_time, values_for_hash)
@@ -2331,11 +1894,11 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         if out_path is None:
                             # Possibly override (payload_datetime) in filename for TXT
                             pdt_for_name = first_payload_dt
-                            if fmt == "txt" and _lookup_uses_received_last10(lookup):
-                                pdt_for_name = _received_prev10_ts12_from_received_time(received_time)
+                            if fmt == "txt" and lookup_uses_received_last10(lookup):
+                                pdt_for_name = received_prev10_ts12_from_received_time(received_time)
 
                             # Merge payload tokens with (received_last10min) + transmit tokens
-                            extra_for_name = _make_filename_extra_tokens(received_time, first_payload_extra_tokens or {})
+                            extra_for_name = make_filename_extra_tokens(received_time, first_payload_extra_tokens or {})
 
                             out_name = compose_filename_tokens(
                                 cfg.filename_pattern,
@@ -2349,6 +1912,10 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                                 apply_shift=getattr(cfg, "shift_filename_time", False),
                                 shift_hhmm=getattr(cfg, "filename_time_shift", ""),
                                 shift_minutes=getattr(cfg, "filename_time_shift_minutes", 0),
+                                apply_tz=(getattr(cfg, "shift_filename_time", False) and getattr(cfg,
+                                                                                                 "use_timezone_shift",
+                                                                                                 False)),
+                                tz_name=getattr(cfg, "timezone_name", ""),
                             )
 
                             out_path = os.path.join(dest_dir, out_name)
@@ -2357,10 +1924,9 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                         if fmt == "txt":
                             line_txt = _compose_txt_payload_line(
                                 tag, toks, lookup, cfg.missing_value,
-                                cfg=cfg, received_time=received_time, transmit_ts12=tx_ts12  # NEW: pass transmit
+                                cfg=cfg, received_time=received_time, transmit_ts12=tx_ts12
                             )
                             _write_payload_txt_line(out_path, line_txt)
-
 
                             _index_mark(state_conn, folder_tag, dedupe_key)
                             preloaded_keys.add(dedupe_key)
@@ -2387,8 +1953,6 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                     if fmt == "txt" and out_path and cfg.use_ftp_output and getattr(cfg, "ftp_make_vrf_files", False):
                         vrf_path = _ensure_vrf_for_txt(out_path)
                         touched_files_per_folder[folder_tag].add(vrf_path)
-
-
 
                 except Exception as e:
                     reason = "write_error"
@@ -2450,5 +2014,3 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 shutil.rmtree(temp_dir_for_run, ignore_errors=True)
             except Exception:
                 pass
-
-

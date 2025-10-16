@@ -235,7 +235,7 @@
     "300534068522890@rockblock.rock7.com": {
       "formats": {
         "S": {
-          "prefix": "EW1_L1",
+          "prefix": "L1",
           "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
           "emit_d": {
             "xyz_from": "C_S",
@@ -260,7 +260,7 @@
     "300534064793870@rockblock.rock7.com": {
       "formats": {
         "S": {
-          "prefix": "EW1_L3",
+          "prefix": "L3",
           "columns": ["Log_no","C_S","Source","date","Battery","BattA","BattB","OpVolt","PNL1V","GPDOP","GPSSC","lat","lon","SOGM","GPSB","wcdist"],
           "emit_d": {
             "xyz_from": "C_S",
@@ -315,7 +315,7 @@
           "emit_d": {
             "xyz_from": "C_S",
             "tag_from": "Source",
-            "timestamp_field": "payload_date_time +01:00",
+            "timestamp_field": "payload_date_time",
             "k1": "K1",
             "m2": "M2",
             "battery_label": "BATTERY",
@@ -335,7 +335,7 @@
     "300534068527890@rockblock.rock7.com": {
       "formats": {
         "S": {
-          "prefix": "EW1_L9",
+          "prefix": "L9",
           "columns": ["Log_no","C_S","Source","date","BATTERY_A","Battery_B"],
           "emit_d": {
             "xyz_from": "C_S",
@@ -360,7 +360,7 @@
     "300534068523870@rockblock.rock7.com": {
       "formats": {
         "S": {
-          "prefix": "EW1_L2",
+          "prefix": "L2",
           "columns": ["Log_no","C_S","Source","date","BATTERY","AMRW-com","AMRWBar","AMRWTemp","AMRWDirT","AMRSpd","Max_Spd","VelStdDev","Gust_Factot","3_Sec_Gust","Vector_AVG_SPEED","Lat","Lon","GPStime"],
           "emit_d": {
             "xyz_from": "C_S",
