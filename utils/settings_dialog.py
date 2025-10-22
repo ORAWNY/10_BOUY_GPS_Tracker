@@ -26,14 +26,16 @@ def _get_bool(settings: QSettings, key: str, default: bool) -> bool:
 class GuardrailSettings:
     # App lifecycle
     auto_restart_on_crash: bool = True
-    auto_restart_on_exit:  bool = False  # <-- NEW checkbox
+    auto_restart_on_exit:  bool = False
     # Email/Outlook resilience
     restart_outlook_on_outlook_errors: bool = True
     restart_app_on_outlook_errors:     bool = True
+    restart_on_programmatic_close: bool = True
 
     # keys in QSettings
     _K_CRASH   = "guard/auto_restart_on_crash"
     _K_EXIT    = "guard/auto_restart_on_exit"
+    _K_PGM = "guard/restart_on_programmatic_close"
     _K_RO_RE   = "guard/restart_outlook_on_outlook_errors"
     _K_RA_ROE  = "guard/restart_app_on_outlook_errors"
 
@@ -43,6 +45,7 @@ class GuardrailSettings:
         return cls(
             auto_restart_on_crash=_get_bool(s, cls._K_CRASH, True),
             auto_restart_on_exit=_get_bool(s, cls._K_EXIT, False),
+            restart_on_programmatic_close=_get_bool(s, cls._K_PGM, True),
             restart_outlook_on_outlook_errors=_get_bool(s, cls._K_RO_RE, True),
             restart_app_on_outlook_errors=_get_bool(s, cls._K_RA_ROE, True),
         )
@@ -51,6 +54,7 @@ class GuardrailSettings:
         s = QSettings(ORG, APP)
         s.setValue(self._K_CRASH, self.auto_restart_on_crash)
         s.setValue(self._K_EXIT, self.auto_restart_on_exit)
+        s.setValue(self._K_PGM, self.restart_on_programmatic_close)
         s.setValue(self._K_RO_RE, self.restart_outlook_on_outlook_errors)
         s.setValue(self._K_RA_ROE, self.restart_app_on_outlook_errors)
 
@@ -80,11 +84,18 @@ class SettingsDialog(QDialog):
         self.chk_restart_on_exit.setToolTip("If enabled, closing the window will relaunch the app automatically.")
         self.chk_restart_on_exit.setChecked(self._result.auto_restart_on_exit)
 
+        self.chk_restart_on_programmatic = QCheckBox("Restart on programmatic close")
+        self.chk_restart_on_programmatic.setToolTip(
+            "If enabled, the app will also relaunch when it is closed programmatically (e.g., QCoreApplication.quit())."
+        )
+        self.chk_restart_on_programmatic.setChecked(self._result.restart_on_programmatic_close)
+
         self.chk_restart_on_crash = QCheckBox("Auto-restart on crash")
         self.chk_restart_on_crash.setToolTip("If the app crashes unexpectedly, it will relaunch automatically (with throttling).")
         self.chk_restart_on_crash.setChecked(self._result.auto_restart_on_crash)
 
         vl_app.addWidget(self.chk_restart_on_exit)
+        vl_app.addWidget(self.chk_restart_on_programmatic)
         vl_app.addWidget(self.chk_restart_on_crash)
 
         # ---- Outlook group ----
@@ -121,6 +132,8 @@ class SettingsDialog(QDialog):
     def _on_accept(self):
         self._result.auto_restart_on_exit  = self.chk_restart_on_exit.isChecked()
         self._result.auto_restart_on_crash = self.chk_restart_on_crash.isChecked()
+        self._result.restart_on_programmatic_close = self.chk_restart_on_programmatic.isChecked()
+
         self._result.restart_outlook_on_outlook_errors = self.chk_restart_outlook.isChecked()
         self._result.restart_app_on_outlook_errors     = self.chk_restart_app_on_outlook.isChecked()
         self.accept()

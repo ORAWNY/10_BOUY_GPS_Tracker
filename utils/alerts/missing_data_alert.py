@@ -1,20 +1,21 @@
 # utils/alerts/missing_data_alert.py
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import re
+import numpy as np
 import pandas as pd
 
-# --- add/extend imports at the top of missing_data_alert.py ---
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QSpinBox, QCheckBox, QPushButton, QVBoxLayout, QLineEdit,
-    QLabel, QListWidget, QListWidgetItem, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QToolButton, QComboBox, QFileDialog, QMessageBox
+    QLabel, QListWidget, QListWidgetItem, QHBoxLayout, QSplitter,
+    QTableWidget, QTableWidgetItem, QToolButton, QComboBox, QFileDialog, QMessageBox, QWidget,
+    QHeaderView
 )
 from PyQt6.QtGui import QColor, QBrush
+from PyQt6.QtCore import Qt
 
 from utils.alerts import REGISTRY, register, AlertSpec, AlertHandler, EvalResult, Status, Host
-
 from utils.time_settings import local_zone, parse_series_to_local_naive
 
 
@@ -54,11 +55,12 @@ class _Editor(QDialog):
         form = QFormLayout()
         lay.addLayout(form)
 
-        df = getattr(host, "df", None)
+        # --- SAFE: avoid pandas truthiness ---
+        df = getattr(self.host, "df", None)
         if df is None:
             df = pd.DataFrame()
 
-        tcol = _pick_time_col(df, getattr(host, "datetime_col", None))
+        tcol = _pick_time_col(df, getattr(self.host, "datetime_col", None))
 
         # ---- Column picker ----
         all_cols = [c for c in list(df.columns) if c != tcol]
@@ -71,8 +73,7 @@ class _Editor(QDialog):
         self.cols_list = QListWidget(self)
         self.cols_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         for c in all_cols:
-            it = QListWidgetItem(c)
-            self.cols_list.addItem(it)
+            self.cols_list.addItem(QListWidgetItem(c))
 
         # Preselect from payload (if any)
         preset = p.get("columns") or []
@@ -161,14 +162,97 @@ class _Editor(QDialog):
         self.spec.payload = p
         super().accept()
 
-# --- add this class anywhere below _Editor, above MissingDataHandler (or just above the handler methods) ---
 
+# ---------- helper: a frozen-first-column composite table ----------
+class FrozenFirstColumn(QWidget):
+    """
+    Two synchronized QTableWidgets:
+      - left: first column (frozen)
+      - main: remaining columns (scrollable)
+    Vertical scrollbars stay in sync. The header row is naturally frozen by Qt.
+    """
+    def __init__(self, left_header: str, parent=None):
+        super().__init__(parent)
+        self.left = QTableWidget(0, 1, self)
+        self.left.setHorizontalHeaderLabels([left_header])
+        self.left.verticalHeader().setVisible(False)
+        self.left.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.left.setWordWrap(False)
+        self.left.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.left.horizontalHeader().setStretchLastSection(False)
+
+        self.main = QTableWidget(0, 0, self)
+        self.main.verticalHeader().setVisible(False)
+        self.main.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.main.setWordWrap(False)
+
+        # sync scrolling
+        self.left.verticalScrollBar().valueChanged.connect(self.main.verticalScrollBar().setValue)
+        self.main.verticalScrollBar().valueChanged.connect(self.left.verticalScrollBar().setValue)
+
+        # layout
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        h.addWidget(self.left, 0)
+        h.addWidget(self.main, 1)
+
+    def auto_fit_left(self, extra_padding: int = 24):
+        """Resize the frozen left column to fit its widest content + padding."""
+        self.left.resizeColumnToContents(0)
+        pad = extra_padding
+        vscroll = self.left.verticalScrollBar().sizeHint().width() if self.left.verticalScrollBar() else 0
+        width = self.left.columnWidth(0) + pad + vscroll
+        # clamp to fixed width so text is always fully visible
+        self.left.setMinimumWidth(width)
+        self.left.setMaximumWidth(width)
+
+    # convenience methods used by caller
+    def clear(self):
+        self.left.setRowCount(0)
+        self.main.setRowCount(0)
+
+    def set_left_header(self, name: str):
+        self.left.setHorizontalHeaderLabels([name])
+
+    def set_main_headers(self, headers: List[str]):
+        self.main.setColumnCount(len(headers))
+        self.main.setHorizontalHeaderLabels(headers)
+
+    def append_row(self, left_value: str, main_values: List[Any], bg_mask: Optional[List[bool]] = None):
+        # left table
+        lr = self.left.rowCount()
+        self.left.insertRow(lr)
+        self.left.setItem(lr, 0, QTableWidgetItem(left_value))
+
+        # main table
+        mr = self.main.rowCount()
+        if mr != lr:
+            self.main.insertRow(lr)
+        else:
+            self.main.insertRow(mr)
+        row_idx = lr
+
+        for j, v in enumerate(main_values):
+            it = QTableWidgetItem("" if v is None else str(v))
+            if bg_mask and j < len(bg_mask) and bg_mask[j]:
+                it.setBackground(QBrush(QColor("#f59f00")))
+            self.main.setItem(row_idx, j, it)
+
+    def horizontal_header_item(self, j: int) -> Optional[QTableWidgetItem]:
+        return self.main.horizontalHeaderItem(j)
+
+
+# --- Summary-enhanced viewer dialog with frozen left columns & resizable panes ---
 class _MissingDataViewerDialog(QDialog):
     """
     MissingData inspector:
       • Top bar: Range, Refresh, thresholds & selected columns, Edit…, Export…
-      • Header: % rows populated per selected column (in current window)
-      • Table: Time (local) + selected columns; missing values highlighted
+      • (old quick-glance header hidden)
+      • Summary matrix: metrics × columns, left metric names frozen, top header frozen
+      • Table: Time (local) frozen on the left + selected columns; missing/bad values highlighted
+      • Top and bottom panes are resizable (QSplitter vertical)
     """
     def __init__(self, spec: AlertSpec, host: Host, parent=None):
         super().__init__(parent)
@@ -176,9 +260,9 @@ class _MissingDataViewerDialog(QDialog):
         self.host = host
         self._parent = parent
         self.setWindowTitle(spec.name or "Missing data preview")
-        self.setMinimumSize(980, 560)
+        self.setMinimumSize(1100, 620)
 
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
 
         # Top controls
         ctrl = QHBoxLayout()
@@ -186,40 +270,36 @@ class _MissingDataViewerDialog(QDialog):
         self.range_combo = QComboBox()
         self.range_combo.addItems(["6 h", "12 h", "24 h", "3 d", "7 d", "30 d", "All"])
         self.range_combo.setCurrentText("24 h")
-        self.refresh_btn = QToolButton()
-        self.refresh_btn.setText("⟳ Refresh")
-        self.refresh_btn.clicked.connect(self._rebuild)
+        self.refresh_btn = QToolButton(); self.refresh_btn.setText("⟳ Refresh"); self.refresh_btn.clicked.connect(self._rebuild)
         self.th_label = QLabel(" ")
         self.cols_label = QLabel(" ")
+        self.edit_btn = QToolButton(); self.edit_btn.setText("⚙ Edit…"); self.edit_btn.clicked.connect(self._on_edit)
+        self.export_btn = QToolButton(); self.export_btn.setText("⬇ Export…"); self.export_btn.clicked.connect(self._export_report)
 
-        self.edit_btn = QToolButton()
-        self.edit_btn.setText("⚙ Edit…")
-        self.edit_btn.clicked.connect(self._on_edit)
-        self.export_btn = QToolButton()
-        self.export_btn.setText("⬇ Export…")
-        self.export_btn.clicked.connect(self._export_report)
+        ctrl.addWidget(self.range_combo); ctrl.addWidget(self.refresh_btn)
+        ctrl.addStretch(1); ctrl.addWidget(self.th_label); ctrl.addSpacing(12); ctrl.addWidget(self.cols_label)
+        ctrl.addStretch(1); ctrl.addWidget(self.edit_btn); ctrl.addWidget(self.export_btn)
+        outer.addLayout(ctrl)
 
-        ctrl.addWidget(self.range_combo)
-        ctrl.addWidget(self.refresh_btn)
-        ctrl.addStretch(1)
-        ctrl.addWidget(self.th_label)
-        ctrl.addSpacing(12)
-        ctrl.addWidget(self.cols_label)
-        ctrl.addStretch(1)
-        ctrl.addWidget(self.edit_btn)
-        ctrl.addWidget(self.export_btn)
-        lay.addLayout(ctrl)
+        # Old quick-glance line hidden per request
+        self.summary_lbl = QLabel(" "); self.summary_lbl.setStyleSheet("font-weight:600;")
+        self.summary_lbl.hide()
+        outer.addWidget(self.summary_lbl)
 
-        # Summary % per column
-        self.summary_lbl = QLabel(" ")
-        self.summary_lbl.setStyleSheet("font-weight: 600;")
-        lay.addWidget(self.summary_lbl)
+        # Splitter between summary matrix (top) and data table (bottom)
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+        outer.addWidget(self.splitter, 1)
 
-        # Table
-        self.table = QTableWidget(0, 1, self)
-        self.table.setHorizontalHeaderLabels(["Time (local)"])
-        self.table.verticalHeader().setVisible(False)
-        lay.addWidget(self.table, 1)
+        # --- Top: Summary matrix with frozen first column (Metric) ---
+        self.summary_matrix = FrozenFirstColumn(left_header="Metric", parent=self)
+        self.splitter.addWidget(self.summary_matrix)
+
+        # --- Bottom: Data table with frozen left column (Time) ---
+        self.data_grid = FrozenFirstColumn(left_header="Time (local)", parent=self)
+        self.splitter.addWidget(self.data_grid)
+
+        # reasonable initial sizes; user can drag to resize
+        self.splitter.setSizes([300, 600])
 
         self._rebuild()
 
@@ -236,7 +316,6 @@ class _MissingDataViewerDialog(QDialog):
         return m.get(self.range_combo.currentText(), None)
 
     def _time_col(self, df: pd.DataFrame) -> Optional[str]:
-        # prefer the host's configured datetime column if present
         dt_pref = getattr(self.host, "datetime_col", None)
         if dt_pref and dt_pref in df.columns:
             return dt_pref
@@ -276,8 +355,8 @@ class _MissingDataViewerDialog(QDialog):
             QMessageBox.information(self, "Export", "No data to export.")
             return
         try:
-            out = dfw[[tcol] + cols].copy()
-            out = out.rename(columns={tcol: "time_local"})
+            summary_map = self._compute_summary_per_column(dfw, tcol, cols)
+            out = dfw[[tcol] + cols].copy().rename(columns={tcol: "time_local"})
             out["time_local"] = out["time_local"].dt.strftime("%Y-%m-%d %H:%M:%S")
             with open(path, "w", encoding="utf-8") as f:
                 p = self.spec.payload or {}
@@ -287,6 +366,11 @@ class _MissingDataViewerDialog(QDialog):
                 f.write(f"# AMBER<{int(p.get('amber_pct', 95))}%, RED<{int(p.get('red_pct', 80))}%\n")
                 for c in cols:
                     f.write(f"# {c}: {pct.get(c, 0.0):.1f}% filled\n")
+                f.write("# --- summary (metrics × columns) ---\n")
+                metrics = self._summary_metric_names()
+                for m in metrics:
+                    row = [m] + [str(summary_map.get(m, {}).get(c, "")) for c in cols]
+                    f.write("# " + ", ".join(row) + "\n")
                 f.write("# --- data ---\n")
             out.to_csv(path, index=False, mode="a")
             QMessageBox.information(self, "Export", f"Saved report to:\n{path}")
@@ -294,7 +378,7 @@ class _MissingDataViewerDialog(QDialog):
             QMessageBox.critical(self, "Export error", str(e))
 
     # -------- data slicing --------
-    def _current_windowed(self):
+    def _current_windowed(self) -> Tuple[pd.DataFrame, str, List[str], Dict[str, float]]:
         df = getattr(self.host, "df", None)
         if df is None or df.empty:
             return pd.DataFrame(), "", [], {}
@@ -324,6 +408,93 @@ class _MissingDataViewerDialog(QDialog):
                 pct[c] = float(d[c].notna().sum()) / n * 100.0
         return d, tcol, cols, pct
 
+    # -------- summary (per column) --------
+    def _summary_metric_names(self) -> List[str]:
+        return [
+            "Usual gap (median)",
+            "Avg gap (mean)",
+            "Missing timestamps (# >2× usual gap)",
+            "Availability % (valid cells)",
+            "Valid numeric min",
+            "Valid numeric max",
+            "Valid numeric mean",
+            "Count empty-string",
+            "Count zero",
+            "Count 9999",
+            "Count -9999",
+            "Count NaN",
+            "Rows (window)",
+        ]
+
+    def _compute_summary_per_column(self, d: pd.DataFrame, tcol: str, cols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Returns a dict: metric_name -> { column_name: value }
+        Time-gap metrics are common to all columns (copied across).
+        'Availability' counts cells that are NOT: NaN, empty-string, 0, 9999, -9999.
+        Numeric stats use coerced numeric values, excluding 0 and ±9999.
+        """
+        out: Dict[str, Dict[str, Any]] = {m: {} for m in self._summary_metric_names()}
+        if d.empty or not cols:
+            return out
+
+        # time gap metrics (shared)
+        dt_series = d[tcol].sort_values()
+        gaps = dt_series.diff().dropna()
+        if gaps.empty:
+            med_gap = pd.Timedelta(0); mean_gap = pd.Timedelta(0); miss_ts = 0
+        else:
+            med_gap = gaps.median(); mean_gap = gaps.mean()
+            thr = 2 * med_gap if med_gap.total_seconds() > 0 else pd.Timedelta.max
+            miss_ts = int((gaps > thr).sum()) if thr != pd.Timedelta.max else 0
+
+        def fmt_td(td: pd.Timedelta) -> str:
+            secs = int(td.total_seconds())
+            if secs <= 0: return "0s"
+            parts = []
+            days, rem = divmod(secs, 86400)
+            if days: parts.append(f"{days}d")
+            hrs, rem = divmod(rem, 3600)
+            if hrs: parts.append(f"{hrs}h")
+            mins, rem = divmod(rem, 60)
+            if mins: parts.append(f"{mins}m")
+            if rem or not parts: parts.append(f"{rem}s")
+            return " ".join(parts)
+
+        # per-column stats
+        for c in cols:
+            s = d[c]
+
+            empty_mask = s.apply(lambda x: isinstance(x, str) and x.strip() == "")
+            zero_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == 0)
+            n9999_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == -9999)
+            p9999_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == 9999)
+            nan_mask = s.isna()
+            bad_mask = empty_mask | zero_mask | n9999_mask | p9999_mask | nan_mask
+
+            total = int(s.shape[0])
+            good = int(total - int(bad_mask.sum()))
+            availability = 100.0 * good / total if total else 0.0
+
+            # numeric stats on valid numbers only
+            num = pd.to_numeric(s, errors="coerce").mask(lambda x: x.isin([0, 9999, -9999]))
+            num_valid = num.dropna()
+
+            out["Usual gap (median)"][c] = fmt_td(med_gap)
+            out["Avg gap (mean)"][c] = fmt_td(mean_gap)
+            out["Missing timestamps (# >2× usual gap)"][c] = miss_ts
+            out["Availability % (valid cells)"][c] = f"{availability:.1f}"
+            out["Valid numeric min"][c] = f"{float(num_valid.min()):.6g}" if not num_valid.empty else "n/a"
+            out["Valid numeric max"][c] = f"{float(num_valid.max()):.6g}" if not num_valid.empty else "n/a"
+            out["Valid numeric mean"][c] = f"{float(num_valid.mean()):.6g}" if not num_valid.empty else "n/a"
+            out["Count empty-string"][c] = int(empty_mask.sum())
+            out["Count zero"][c] = int(zero_mask.sum())
+            out["Count 9999"][c] = int(p9999_mask.sum())
+            out["Count -9999"][c] = int(n9999_mask.sum())
+            out["Count NaN"][c] = int(nan_mask.sum())
+            out["Rows (window)"][c] = total
+
+        return out
+
     # -------- builder --------
     def _rebuild(self):
         p = self.spec.payload or {}
@@ -334,39 +505,55 @@ class _MissingDataViewerDialog(QDialog):
         d, tcol, cols, pct = self._current_windowed()
         self.cols_label.setText(f"Columns: {', '.join(cols) if cols else '(none)'}")
 
-        # Summary line
-        if pct:
-            txt = "   •   ".join(f"{c}: {pct[c]:.1f}%" for c in cols)
-        else:
-            txt = "No data"
-        self.summary_lbl.setText(txt)
+        # Old header line disabled per user request
+        self.summary_lbl.clear()
 
-        # Table
-        self.table.setRowCount(0)
-        headers = ["Time (local)"] + cols
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
+        # --- TOP: Summary matrix (metrics × columns) ---
+        self.summary_matrix.clear()
+        self.summary_matrix.set_left_header("Metric")
+        self.summary_matrix.set_main_headers(cols)
 
         if d.empty or not cols:
-            return
+            for m in self._summary_metric_names():
+                self.summary_matrix.append_row(m, [""] * len(cols))
+        else:
+            summary_map = self._compute_summary_per_column(d, tcol, cols)
+            for m in self._summary_metric_names():
+                row_vals = [summary_map.get(m, {}).get(c, "") for c in cols]
+                self.summary_matrix.append_row(m, row_vals)
+        # ensure the frozen metric column is fully readable
+        self.summary_matrix.auto_fit_left()
 
-        # Fill rows; color missing cells amber; if a column is 0% filled, tint its header red
-        for _, row in d[[tcol] + cols].iterrows():
-            r_i = self.table.rowCount()
-            self.table.insertRow(r_i)
-            self.table.setItem(r_i, 0, QTableWidgetItem(row[tcol].strftime("%Y-%m-%d %H:%M:%S")))
-            for j, c in enumerate(cols, start=1):
-                val = row[c]
-                item = QTableWidgetItem("" if pd.isna(val) else str(val))
-                if pd.isna(val):
-                    item.setBackground(QBrush(QColor("#f59f00")))  # amber
-                self.table.setItem(r_i, j, item)
+        # --- BOTTOM: Data grid with frozen Time column ---
+        self.data_grid.clear()
+        self.data_grid.set_left_header("Time (local)")
+        self.data_grid.set_main_headers(cols)
 
-        # Header tint for columns completely missing
-        for j, c in enumerate(cols, start=1):
-            if pct.get(c, 0.0) <= 0.0:
-                self.table.horizontalHeaderItem(j).setBackground(QBrush(QColor("#f03e3e")))
+        if not d.empty and cols:
+            for _, row in d[[tcol] + cols].iterrows():
+                ts = row[tcol].strftime("%Y-%m-%d %H:%M:%S")
+                vals = []
+                bads = []
+                for c in cols:
+                    val = row[c]
+                    vals.append("" if pd.isna(val) else str(val))
+                    is_bad = (
+                        pd.isna(val)
+                        or (isinstance(val, str) and val.strip() == "")
+                        or (isinstance(val, (int, float, np.integer, np.floating)) and val in {0, 9999, -9999})
+                    )
+                    bads.append(is_bad)
+                self.data_grid.append_row(ts, vals, bg_mask=bads)
 
+            # Header tint for columns completely missing (per NaN basis like before)
+            for j, c in enumerate(cols):
+                if pct.get(c, 0.0) <= 0.0:
+                    item = self.data_grid.horizontal_header_item(j)
+                    if item:
+                        item.setBackground(QBrush(QColor("#f03e3e")))
+
+        # ensure the frozen time column is fully readable
+        self.data_grid.auto_fit_left()
 
 
 @register
@@ -378,6 +565,7 @@ class MissingDataHandler(AlertHandler):
     kind = "MissingData"
 
     def default_spec(self, host: Host) -> AlertSpec:
+        # --- SAFE: avoid pandas truthiness ---
         df = getattr(host, "df", None)
         if df is None:
             df = pd.DataFrame()
@@ -430,7 +618,7 @@ class MissingDataHandler(AlertHandler):
         if not cols:
             return {"status": Status.OFF, "observed": 0.0, "summary": "pick columns"}
 
-        # Irish local, tz-naive
+        # local tz-naive
         ts = parse_series_to_local_naive(df[tcol]).dropna()
         if ts.empty:
             return {"status": Status.OFF, "observed": 0.0, "summary": "no valid times"}
@@ -455,7 +643,7 @@ class MissingDataHandler(AlertHandler):
             return {"status": status, "observed": worst_pct, "summary": summary,
                     "extra": {"window_minutes": win_min, "columns": cols, "per_column": {}}}
 
-        # Per-column % filled
+        # Per-column % filled (NaN-only basis for alert semantics)
         per_col_pct: Dict[str, float] = {}
         for c in cols:
             filled = int(dff[c].notna().sum())

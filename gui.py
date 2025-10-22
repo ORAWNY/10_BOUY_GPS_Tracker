@@ -408,6 +408,8 @@ class MainWindow(QMainWindow):
         # Backward-compat defaults
         self.guard.auto_restart_on_crash = bool(getattr(self.guard, "auto_restart_on_crash", False))
         self.guard.auto_restart_on_exit  = bool(getattr(self.guard, "auto_restart_on_exit",  False))
+        self.guard.restart_on_programmatic_close = bool(getattr(self.guard, "restart_on_programmatic_close", True))
+
         self.guard.restart_outlook_on_outlook_errors = bool(getattr(self.guard, "restart_outlook_on_outlook_errors", True))
         self.guard.restart_app_on_outlook_errors     = bool(getattr(self.guard, "restart_app_on_outlook_errors", True))
 
@@ -1538,15 +1540,22 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         try:
             reason = "user" if event.spontaneous() else "programmatic"
+
             if self._had_uncaught_exception and self._last_uncaught_summary:
                 self.activity.log(f"Application closing after error ({reason}): {self._last_uncaught_summary}")
             else:
                 self.activity.log(f"Application closing ({reason}).")
 
-            # Auto-restart on user close
+            # Restart on user-initiated close
             if reason == "user" and getattr(self, "guard", None) and self.guard.auto_restart_on_exit:
                 self.activity.log("Restart when I close the app: ON → relaunching…")
                 self._restart_self("user_exit")
+
+            # NEW: restart on programmatic closes (the case you hit), if enabled
+            elif reason == "programmatic" and getattr(self, "guard", None) and \
+                    bool(getattr(self.guard, "restart_on_programmatic_close", True)) and not self._restarting:
+                self.activity.log("Programmatic close detected; restarting…")
+                self._restart_self("programmatic_close")
 
             # flush any handlers
             logger = logging.getLogger("BuoyApp")
@@ -1578,6 +1587,37 @@ def _bootstrap_temp_logging():
     except Exception:
         pass
 
+def _install_quit_logger():
+    """Log the stack whenever someone calls QCoreApplication.quit() or QApplication.closeAllWindows()."""
+    import traceback, logging
+    from PyQt6.QtCore import QCoreApplication
+    from PyQt6.QtWidgets import QApplication
+
+    log = logging.getLogger("BuoyApp")
+
+    # Wrap QCoreApplication.quit
+    _orig_quit = QCoreApplication.quit
+    def _logged_quit():
+        try:
+            log.info("QUIT invoked programmatically.\nSTACK:\n%s",
+                     "".join(traceback.format_stack(limit=40)))
+        except Exception:
+            pass
+        return _orig_quit()
+    QCoreApplication.quit = staticmethod(_logged_quit)
+
+    # Wrap QApplication.closeAllWindows
+    _orig_close_all = QApplication.closeAllWindows
+    def _logged_close_all():
+        try:
+            log.info("closeAllWindows() invoked programmatically.\nSTACK:\n%s",
+                     "".join(traceback.format_stack(limit=40)))
+        except Exception:
+            pass
+        return _orig_close_all()
+    QApplication.closeAllWindows = _logged_close_all
+
+
 
 # ========================= App bootstrap =========================
 def main():
@@ -1596,6 +1636,7 @@ def main():
             pass
 
     _bootstrap_temp_logging()
+    _install_quit_logger()  # <-- add this line
 
     app = QApplication(sys.argv)
 

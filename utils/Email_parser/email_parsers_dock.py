@@ -348,7 +348,8 @@ class EmailParserManager(QObject):
                     return
                 except Exception as e2:
                     self.log.emit(f"[{mp.name}] Retry failed after Outlook restart: {e2}")
-                    # Optional: emit app_restart_requested if you want a full app restart hook
+                    if self._restart_app_on_outlook_fail:
+                        self.app_restart_requested.emit("outlook_retry_failed")
 
     # -------------------- Hooks from UI --------------------
     def set_auto_update(self, index: int, enabled: bool):
