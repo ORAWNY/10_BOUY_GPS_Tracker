@@ -1632,9 +1632,27 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 try:
                     folder = resolve_folder_path(mailbox, path)
                 except Exception as e:
+                    # Log first for visibility
                     log(f"Folder not found: {cfg.mailbox} > " + " > ".join(path) + f" ({e})")
+
+                    # If this looks like a transient Outlook/MAPI/COM problem, bubble it up so the manager
+                    # can trigger the Outlook restart + retry (and possibly app restart).
+                    emsg = (str(e) or "").lower()
+                    if (
+                            "microsoft outlook" in emsg
+                            or "mapi" in emsg
+                            or "the attempted operation failed" in emsg
+                            or "object could not be found" in emsg
+                            or "rpc_e_server_unavailable" in emsg
+                            or "-2147221233" in emsg  # common HRESULT for this case
+                            or "-2147352567" in emsg  # COM wrapper code often accompanying it
+                    ):
+                        raise RuntimeError(f"Outlook folder access error: {e}") from e
+
+                    # Otherwise treat as a genuine path/folder config issue and keep going
                     results[" > ".join(path)] = {"inserted": 0, "skipped": 1}
                     continue
+
                 try:
                     items = folder.Items
                 except Exception as e:

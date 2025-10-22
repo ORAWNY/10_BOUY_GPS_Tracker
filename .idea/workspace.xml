@@ -5,11 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="09848a77-3268-4985-958e-47189ff9bc8f" name="Changes" comment="updated_commit_24092025">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_parsers_dock.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_parsers_dock.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/alerts/missing_data_alert.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/alerts/missing_data_alert.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/settings_dialog.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/settings_dialog.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_parser_core.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_parser_core.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -110,7 +106,7 @@
       <workItem from="1759242996760" duration="55464000" />
       <workItem from="1760001672522" duration="16756000" />
       <workItem from="1760343415844" duration="3337000" />
-      <workItem from="1761125495581" duration="3170000" />
+      <workItem from="1761125495581" duration="5133000" />
     </task>
     <task id="LOCAL-00001" summary="updated_commit_24092025">
       <option name="closed" value="true" />
