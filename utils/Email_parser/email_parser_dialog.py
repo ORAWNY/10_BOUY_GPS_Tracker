@@ -16,6 +16,15 @@ from utils.Email_parser.email_parser_core import (
 )
 from utils.Email_parser.email_parser_ftp import FTPSession
 
+from datetime import datetime, timezone, timedelta
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo, available_timezones
+except Exception:
+    ZoneInfo = None
+    def available_timezones():  # fallback; user can install tzdata to populate
+        return {"UTC"}
+
 
 DT_FORMAT = "yyyy-MM-dd HH:mm:ss"
 
@@ -41,6 +50,45 @@ def _hhmm_to_minutes(s: str) -> int:
     hh = int(m.group(2))
     mm = int(m.group(3))
     return sign * (hh * 60 + mm)
+
+def _fmt_offset(td):
+    # td can be None for odd zones; treat as zero
+    total_min = int((td or timedelta(0)).total_seconds() // 60)
+    sign = "+" if total_min >= 0 else "-"
+    total_min = abs(total_min)
+    hh, mm = divmod(total_min, 60)
+    return f"UTC{sign}{hh:02d}:{mm:02d}", (1 if sign == "+" else -1) * (hh * 60 + mm)
+
+def _build_timezone_options(reference_dt=None):
+    """
+    Returns list[dict]: {
+      "value": "Europe/Berlin",
+      "label": "Europe/Berlin (UTC+02:00)",
+      "offset_min": 120,
+      "is_dst": True,
+    }
+    Sorted by offset then name. Use 'label' for display, 'value' to store.
+    """
+    if reference_dt is None:
+        reference_dt = datetime.now(timezone.utc)
+    if ZoneInfo is None:
+        return [{"value": "UTC", "label": "UTC (UTC+00:00)", "offset_min": 0, "is_dst": False}]
+
+    opts = []
+    for tz in sorted(available_timezones()):
+        zi = ZoneInfo(tz)
+        local = reference_dt.astimezone(zi)
+        offset_label, offset_min = _fmt_offset(local.utcoffset())
+        is_dst = bool(local.dst() and local.dst().total_seconds() != 0)
+        opts.append({
+            "value": tz,
+            "label": f"{tz} ({offset_label})",
+            "offset_min": offset_min,
+            "is_dst": is_dst,
+        })
+    opts.sort(key=lambda r: (r["offset_min"], r["value"]))
+    return opts
+
 
 
 class CollapsibleSection(QWidget):
@@ -84,7 +132,10 @@ class EmailParserDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Configure Email/Webhook Parser")
         self.setModal(True)
-        self.setMinimumWidth(860)
+        # Bigger, tidier defaults
+        self.setMinimumSize(1100, 800)
+        self.resize(1200, 900)
+        self.setSizeGripEnabled(True)
 
         self._default_db_dir = default_db_dir
         self._initial = initial or EmailParserConfig()
@@ -95,13 +146,14 @@ class EmailParserDialog(QDialog):
         root = QVBoxLayout(self)
         scroller = QScrollArea(self)
         scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
         root.addWidget(scroller)
 
         host = QWidget()
         scroller.setWidget(host)
         page = QVBoxLayout(host)
-        page.setContentsMargins(10, 10, 10, 10)
-        page.setSpacing(10)
+        page.setContentsMargins(12, 12, 12, 12)
+        page.setSpacing(12)
 
         # ──────────────────────────────────────
         # Section 1: Source selection + per-source settings (stacked)
@@ -115,6 +167,7 @@ class EmailParserDialog(QDialog):
         self.source_combo = QComboBox()
         self.source_combo.addItems(["Outlook", "Webhook"])
         self.source_combo.setCurrentText("Webhook" if getattr(self._initial, "webhook_enabled", False) else "Outlook")
+        self.source_combo.setMinimumWidth(220)
         src_row.addWidget(self.source_combo, 1)
         src_layout.addLayout(src_row)
 
@@ -134,6 +187,8 @@ class EmailParserDialog(QDialog):
         # ──────────────────────────────────────
         out_container = QWidget()
         out_form = QFormLayout(out_container)
+        out_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        out_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Parser name
         self.name_edit = QLineEdit(self._initial.parser_name or "")
@@ -238,6 +293,7 @@ class EmailParserDialog(QDialog):
             "Examples: (C_S)(received_last10min) → S23251001104000; "
             "(TAG)_(transmit_time) → L3_251001104000"
         )
+        pattern_help.setWordWrap(True)
         pattern_help.setStyleSheet("color: gray; font-style: italic;")
 
         # Missing value
@@ -250,6 +306,49 @@ class EmailParserDialog(QDialog):
         self.grp_time = QGroupBox("Timestamp & Time Shifts")
         time_form = QFormLayout(self.grp_time)
 
+        # --- Time zone (DST-aware) shift controls ---
+        self.chk_use_tz = QCheckBox("Convert timestamps from UTC to time zone")
+        self.chk_use_tz.setChecked(getattr(self._initial, "use_timezone_shift", False))
+
+        self.tz_combo = QComboBox()
+        self.tz_combo.setEditable(True)  # type-to-search 600+ zones
+
+        def _populate_tz_combo(init_value: str):
+            self.tz_combo.clear()
+            options = _build_timezone_options()  # labels reflect current DST
+            for opt in options:
+                # text shown to user
+                self.tz_combo.addItem(opt["label"], userData=opt["value"])
+            # try to select initial tz by value (IANA ID)
+            iana = (init_value or "").strip() or "UTC"
+            for i in range(self.tz_combo.count()):
+                if self.tz_combo.itemData(i) == iana:
+                    self.tz_combo.setCurrentIndex(i)
+                    break
+
+        init_tz = getattr(self._initial, "timezone_name", "") or "UTC"
+        _populate_tz_combo(init_tz)
+
+        # show TZ picker only if enabled
+        def _toggle_tz_widgets(on: bool):
+            self.tz_combo.setEnabled(on)
+            btn_refresh_tz.setEnabled(on)
+
+        btn_refresh_tz = QToolButton()
+        btn_refresh_tz.setText("↻")
+        btn_refresh_tz.setToolTip("Refresh timezone offsets (reflect DST now)")
+        btn_refresh_tz.clicked.connect(lambda: _populate_tz_combo(self.tz_combo.currentData() or "UTC"))
+
+        tz_row = QHBoxLayout()
+        tz_row.addWidget(self.tz_combo, 1)
+        tz_row.addWidget(btn_refresh_tz, 0)
+
+        _toggle_tz_widgets(self.chk_use_tz.isChecked())
+        self.chk_use_tz.toggled.connect(_toggle_tz_widgets)
+
+        time_form.addRow(self.chk_use_tz, QWidget())  # place checkbox as label row
+        time_form.addRow("", tz_row)
+
         txt = QLabel(
             "TXT timestamp override works for #S→#D and inbound #D lines.\n"
             "• Lookup 'timestamp_field' can be a column name, 'received_last10min' (or 'use_nearest_10_min'), "
@@ -257,6 +356,7 @@ class EmailParserDialog(QDialog):
             "• After that, the global Payload shift below (if enabled) is applied.\n"
             "• Filename tokens can use the snapped/shifted values via the tokens listed above."
         )
+        txt.setWordWrap(True)
         txt.setStyleSheet("color: gray;")
         time_form.addRow(txt)
 
@@ -357,6 +457,7 @@ class EmailParserDialog(QDialog):
             "• Set 'From' and uncheck “Respect checkpoint” to reparse older mail from that time.\n"
             "• Uncheck “Advance checkpoint” for a one-off historical run that doesn’t move the checkpoint."
         )
+        tip.setWordWrap(True)
         tip.setStyleSheet("color: gray;")
 
         r_lay.addRow(self.chk_from, self.dt_from)
@@ -375,6 +476,7 @@ class EmailParserDialog(QDialog):
         adv_container = QWidget()
         adv_layout = QVBoxLayout(adv_container)
         note = QLabel("Advanced settings can be added here (e.g., lookback hours spinner, quiet logging toggle).")
+        note.setWordWrap(True)
         note.setStyleSheet("color: gray;")
         adv_layout.addWidget(note)
         sec_adv = CollapsibleSection("Advanced", adv_container, start_collapsed=True)
@@ -645,6 +747,9 @@ class EmailParserDialog(QDialog):
         cfg.shift_filename_time = self.chk_shift_filename.isChecked()
         cfg.filename_time_shift = (self.shift_filename_edit.text() or "").strip() or "+00:00"
         cfg.filename_time_shift_minutes = _hhmm_to_minutes(cfg.filename_time_shift)
+        cfg.use_timezone_shift = self.chk_use_tz.isChecked()
+        # store the underlying zone ID (IANA), not the pretty label
+        cfg.timezone_name = (self.tz_combo.currentData() or self.tz_combo.currentText() or "").strip()
 
         # Source flags
         src = self.source_combo.currentText()
