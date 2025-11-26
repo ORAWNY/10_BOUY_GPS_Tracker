@@ -6,7 +6,7 @@
       "forms": [
         "tx",
         "tx_last10", "tx_first10", "tx_last5", "tx_first30",
-        "rx_last10", "rx_first5", "received_first15",
+        "rx_last10", "rx_first5", "received_first15", "transmit_ts12",
         "aliases with 'min' suffix accepted (e.g., rx_first10min)"
       ],
       "meaning": {
@@ -211,7 +211,7 @@
       "formats": {
         "S": {
           "prefix": "SEAI_GB1",
-          "columns": ["Log_no","C_S","Source","date","Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+          "columns": ["Log_no","C_S","Source","date","Volt","BatA","BatB","Lat","Lon","col10","col11","COL12","COL13"],
           "emit_d": {
             "xyz_from": "C_S",
             "tag_from": "Source",
@@ -220,7 +220,7 @@
             "m2_from": "C_S",
             "battery_label": "BATTERY",
             "battery_value": "12",
-            "param_order": ["Volt","Bat1","Bat2","Lat","Lon","col10","col11"],
+            "param_order": ["Volt","BatA","BatB","Lat","Lon","col10"],
             "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
           }
         },

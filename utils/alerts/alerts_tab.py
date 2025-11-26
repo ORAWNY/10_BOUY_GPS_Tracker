@@ -237,12 +237,23 @@ class AlertsTab(QWidget):
         self.history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         root.addWidget(self.history)
 
-        # ---------- Timer ----------
+        # ---------- Adaptive master timer ----------
+        # Wakes up exactly when the next alert is due (or again within a cap if none scheduled).
         self.timer = QTimer(self)
-        self._timer_min = 15
-        self.timer.setInterval(max(60_000, int(self._timer_min) * 60_000))
+        self.timer.setSingleShot(True)
+        self._timer_min = 15  # keep for export/import compatibility
         self.timer.timeout.connect(self.evaluate_all)
-        self.timer.start()
+        self._wake_floor_ms = 5_000   # minimum wake delay to avoid tight loops
+        self._wake_cap_ms   = 60_000  # if nothing due, check again within 60s
+        self._reschedule_master_timer(initial=True)
+
+        # ---------- Lightweight live Stale-summary timer ----------
+        # This only refreshes the Summary/Thresholds text for Stale alerts,
+        # so the "time since last data" matches the preview and ticks forward.
+        self._stale_summary_timer = QTimer(self)
+        self._stale_summary_timer.setInterval(1000)  # 1 second; bump to 5000 if you prefer
+        self._stale_summary_timer.timeout.connect(self._refresh_stale_summaries)
+        self._stale_summary_timer.start()
 
         # ============ Load current settings or seed defaults ============
         saved = None
@@ -266,7 +277,70 @@ class AlertsTab(QWidget):
         # eval guard + banner
         self._eval_running = False
         self.quiet_refresh_logs = True
-        self._log_quiet(f"AlertsTab ready ({self._timer_min} min interval)")
+        self._log_quiet(f"AlertsTab ready (adaptive scheduler)")
+
+    # ---------------- Adaptive scheduling helpers ----------------
+
+    def _compute_next_due(self) -> Optional[datetime]:
+        """
+        Return the earliest next_due across enabled alerts (UTC), seeding from the DB if needed.
+        """
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        earliest: Optional[datetime] = None
+
+        for spec in self.specs:
+            if not spec.enabled:
+                continue
+            key = self._key_for(spec)
+
+            # Read per-alert interval
+            try:
+                interval_min = int(spec.payload.get("interval_min", 15))
+            except Exception:
+                interval_min = 15
+            interval_min = max(1, interval_min)
+
+            next_due = self._next_due.get(key)
+            if next_due is None:
+                # Seed from last evaluation time in state DB so we honour per-alert interval on startup.
+                try:
+                    _, updated_utc = read_last_status_meta(self.db_path, self.host.table_name, key)
+                except Exception:
+                    updated_utc = None
+                if updated_utc:
+                    try:
+                        last_dt = _dt.datetime.strptime(updated_utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        next_due = last_dt + pd.Timedelta(minutes=interval_min)
+                    except Exception:
+                        next_due = now
+                else:
+                    next_due = now
+                self._next_due[key] = next_due
+
+            if earliest is None or next_due < earliest:
+                earliest = next_due
+
+        return earliest
+
+    def _reschedule_master_timer(self, *, initial: bool = False):
+        """
+        Schedule the master timer to the earliest next_due; if none, wake again soon.
+        """
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        nxt = self._compute_next_due()
+
+        if nxt is None:
+            # No enabled alerts. Recheck soon so we stay responsive if user enables one.
+            self.timer.start(self._wake_cap_ms)
+            return
+
+        delta_ms = int((nxt - now).total_seconds() * 1000)
+        if delta_ms < self._wake_floor_ms:
+            delta_ms = self._wake_floor_ms  # avoid zero/negative tight loops
+
+        self.timer.start(delta_ms)
+
+    # ----------------------------------------------------------------------
 
     def _clear_alerts_history(self):
         btn = QMessageBox.question(
@@ -397,7 +471,6 @@ class AlertsTab(QWidget):
                     "observed": observed,
                     "last_lat": last_lat,
                     "last_lon": last_lon,
-                    "last_time": last_time_utc,
                     "recipients": recipients,
                     "notes": notes,
                 }
@@ -510,6 +583,7 @@ class AlertsTab(QWidget):
                                      json.dumps(s.to_dict(), ensure_ascii=False))
         self._persist_current_settings()
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def _selected_specs(self) -> List[AlertSpec]:
         rows = {idx.row() for idx in self.table.selectionModel().selectedRows()}
@@ -604,6 +678,7 @@ class AlertsTab(QWidget):
 
             self.refresh_table()
             self._write_alerts_log(condition="import", notes=f"Imported {len(incoming)} alert(s) from {path}")
+            self._reschedule_master_timer()
         except Exception as e:
             QMessageBox.critical(self, "Import error", str(e))
 
@@ -645,6 +720,7 @@ class AlertsTab(QWidget):
 
             self.refresh_table()
             self._write_alerts_log(condition="paste", notes=f"Pasted {len(incoming)} alert(s) from clipboard")
+            self._reschedule_master_timer()
         except Exception as e:
             QMessageBox.critical(self, "Paste error", str(e))
 
@@ -676,6 +752,7 @@ class AlertsTab(QWidget):
         self.configure_spec(spec)
         self._persist_current_settings()
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def add_default_seeds(self):
         for kind in ("Distance", "Stale", "Threshold", "MissingData"):
@@ -685,6 +762,7 @@ class AlertsTab(QWidget):
                 spec.enabled = True  # <— ensure visible/evaluable by default
                 self.specs.append(spec)
                 self._persist_current_settings()
+        self._reschedule_master_timer()
 
     def _persist_current_settings(self):
         try:
@@ -742,6 +820,7 @@ class AlertsTab(QWidget):
         for s in specs:
             self.configure_spec(s)
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def enable_selected(self):
         specs = self._selected_specs()
@@ -752,6 +831,7 @@ class AlertsTab(QWidget):
             if not s.enabled:
                 self.toggle_enable(s)
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def disable_selected(self):
         specs = self._selected_specs()
@@ -762,6 +842,7 @@ class AlertsTab(QWidget):
             if s.enabled:
                 self.toggle_enable(s)
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def duplicate_selected(self):
         specs = self._selected_specs()
@@ -771,6 +852,7 @@ class AlertsTab(QWidget):
         for s in list(specs):
             self.duplicate_spec(s)
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def delete_selected(self):
         specs = self._selected_specs()
@@ -786,6 +868,7 @@ class AlertsTab(QWidget):
         for s in specs:
             self.delete_spec(s)
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def _refresh_badge(self):
         n = count_flagged(self.db_path, self.host.table_name)
@@ -809,6 +892,42 @@ class AlertsTab(QWidget):
             color = _status_color(status, spec.enabled)
             item.setForeground(QBrush(QColor("#ffffff")))
             item.setBackground(QBrush(QColor(color)))
+
+    def _refresh_stale_summaries(self):
+        """
+        Update the Summary / Thresholds column for Stale alerts using a fresh
+        handler.evaluate() call. This is UI-only: it does NOT change DB state,
+        flags, or email behaviour.
+        """
+        if not self.specs or self.table.rowCount() == 0:
+            return
+
+        # If table and specs somehow got out of sync, wait for a full refresh_table().
+        if self.table.rowCount() != len(self.specs):
+            return
+
+        for row, spec in enumerate(self.specs):
+            # Only enabled Stale alerts need this live 'time since last data'
+            if not spec.enabled or spec.kind != "Stale":
+                continue
+
+            try:
+                res = REGISTRY[spec.kind].evaluate(spec, self.host)
+                summary = res.get("summary", "")
+            except Exception:
+                summary = ""
+
+            item = self.table.item(row, self.COL_SUMMARY)
+            if item is None:
+                item = QTableWidgetItem(summary)
+                self.table.setItem(row, self.COL_SUMMARY, item)
+            else:
+                # Avoid pointless repaints if text hasn't changed
+                if item.text() != summary:
+                    item.setText(summary)
+
+        # Keep the colour chip aligned with evolving summaries
+        self._recolor_status_cells()
 
     # -------- Actions --------
     def duplicate_spec(self, spec: AlertSpec):
@@ -835,6 +954,7 @@ class AlertsTab(QWidget):
         self._persist_current_settings()
         self.refresh_table()
         self._write_alerts_log(condition="duplicate", notes=f"Duplicated '{spec.name or spec.kind}' → '{new_spec.name}'", spec=new_spec)
+        self._reschedule_master_timer()
 
     def _on_flag_toggle(self, spec: AlertSpec, state: int):
         checked = bool(state)
@@ -860,6 +980,7 @@ class AlertsTab(QWidget):
             clear_all_flags(self.db_path, self.host.table_name)
             self._write_alerts_log(condition="flag:clear_all", notes="User cleared all flags")
             self.refresh_table()
+            self._reschedule_master_timer()
         except Exception as e:
             QMessageBox.critical(self, "Clear flags error", str(e))
 
@@ -895,6 +1016,7 @@ class AlertsTab(QWidget):
             self._write_alerts_log(condition="configured", notes=f"Configured '{spec.name or spec.kind}'", spec=spec)
             self._persist_current_settings()
             self.refresh_table()
+            self._reschedule_master_timer()
 
     def toggle_enable(self, spec: AlertSpec):
         spec.enabled = not spec.enabled
@@ -921,6 +1043,7 @@ class AlertsTab(QWidget):
                              json.dumps(spec.to_dict(), ensure_ascii=False))
         self._persist_current_settings()  # <-- persist after mutation
         self.refresh_table()
+        self._reschedule_master_timer()
 
     def delete_spec(self, spec: AlertSpec):
         self.specs = [s for s in self.specs if s.id != spec.id]
@@ -928,6 +1051,35 @@ class AlertsTab(QWidget):
         write_settings_audit(self.db_path, self.host.table_name, "deleted", json.dumps(spec.to_dict(), ensure_ascii=False))
         self._write_alerts_log(condition="deleted", notes=f"Removed alert '{spec.name or spec.kind}'", spec=spec)
         self.refresh_table()
+        self._reschedule_master_timer()
+
+    # -------- Email window limiter --------
+    def _count_emails_in_window(self, key: str, window_minutes: int) -> int:
+        """
+        Count 'email:sent' for this alert within the last `window_minutes`, using alerts_log.
+        """
+        try:
+            win = int(max(1, window_minutes))
+            state_db_path = get_state_db_path_for(self.db_path)
+            conn = sqlite3.connect(state_db_path)
+            cur = conn.cursor()
+            # created_utc stored as naive UTC "YYYY-mm-dd HH:MM:SS"
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM alerts_log
+                WHERE table_name=?
+                  AND alert_id=?
+                  AND condition='email:sent'
+                  AND created_utc >= strftime('%Y-%m-%d %H:%M:%S', datetime('now','-{win} minutes'))
+                """,
+                (self.host.table_name, key),
+            )
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0] if row else 0)
+        except Exception:
+            return 0
 
     # -------- Evaluation loop --------
     def evaluate_all(self):
@@ -936,6 +1088,8 @@ class AlertsTab(QWidget):
         self._eval_running = True
         try:
             if not any(s.enabled for s in self.specs):
+                # Even if nothing is enabled, keep the timer breathing.
+                self._reschedule_master_timer()
                 return
 
             now = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -1072,13 +1226,14 @@ class AlertsTab(QWidget):
                     if should_consider_email:
                         last_em_status, last_em_utc = read_last_email(self.db_path, self.host.table_name, key)
                         can_email = True
+                        blocked_by_cooldown = False
+                        blocked_by_window = False
+
+                        # Cool-down block (may be overridden by escalation if enabled)
+                        prev_dt = None
                         if cooldown_min > 0 and last_em_utc:
                             try:
                                 def _parse_email_ts_to_utc(s: str):
-                                    """
-                                    Timestamps written by write_last_email() are naive UTC (YYYY-mm-dd HH:MM:SS).
-                                    If tzinfo is missing, treat as UTC (not local).
-                                    """
                                     try:
                                         dt = datetime.fromisoformat(s)
                                     except Exception:
@@ -1092,25 +1247,59 @@ class AlertsTab(QWidget):
 
                                 prev_dt = _parse_email_ts_to_utc(last_em_utc)
                                 if prev_dt and (now - prev_dt).total_seconds() < cooldown_min * 60:
+                                    blocked_by_cooldown = True
                                     can_email = False
-                                    # Avoid spamming "email:skipped" — only log once per cooldown window.
-                                    mute_until = self._skip_logged_until.get(key)
-                                    if not mute_until or now >= mute_until:
-                                        self._write_alerts_log(
-                                            condition="email:skipped",
-                                            threshold=en.get("threshold"),
-                                            observed=en.get("observed", observed),
-                                            last_lat=en.get("last_lat"),
-                                            last_lon=en.get("last_lon"),
-                                            recipients=", ".join(spec.recipients),
-                                            notes=f"Cool-down active ({cooldown_min} min) for '{spec.name or spec.kind}'",
-                                            spec=spec
-                                        )
-                                        self._skip_logged_until[key] = now + pd.Timedelta(minutes=cooldown_min)
                             except Exception:
                                 pass  # if parsing fails, allow email
 
-                        if can_email:
+                        # Windowed burst limit
+                        win_min = int(spec.payload.get("email_window_min", 60))
+                        win_max = int(spec.payload.get("email_window_max", 3))
+                        recent = None
+                        if can_email and win_min > 0 and win_max > 0:
+                            recent = self._count_emails_in_window(key, win_min)
+                            if recent >= win_max:
+                                blocked_by_window = True
+                                can_email = False
+
+                        # Optional override: send on escalation even during cool-down (but still respect window cap)
+                        override_escalation = bool(spec.payload.get("email_escalation_overrides_cooldown", False))
+                        if (not can_email) and escalated and override_escalation and blocked_by_cooldown and (
+                        not blocked_by_window):
+                            can_email = True
+                            blocked_by_cooldown = False  # intentionally overriding cooldown on escalation
+
+                        # If still blocked, ALWAYS log a specific skip row on transitions (no muting here)
+                        if not can_email:
+                            if blocked_by_window:
+                                self._write_alerts_log(
+                                    condition="email:skipped_window",
+                                    threshold=en.get("threshold"),
+                                    observed=en.get("observed", observed),
+                                    last_lat=en.get("last_lat"),
+                                    last_lon=en.get("last_lon"),
+                                    recipients=", ".join(spec.recipients),
+                                    notes=(f"{'Escalation ' if escalated else ''}"
+                                           f"blocked by window ({recent}/{win_max} in last {win_min} min) "
+                                           f"for '{spec.name or spec.kind}'"),
+                                    spec=spec
+                                )
+                            elif blocked_by_cooldown:
+                                self._write_alerts_log(
+                                    condition="email:skipped",
+                                    threshold=en.get("threshold"),
+                                    observed=en.get("observed", observed),
+                                    last_lat=en.get("last_lat"),
+                                    last_lon=en.get("last_lon"),
+                                    recipients=", ".join(spec.recipients),
+                                    notes=(f"{'Escalation ' if escalated else ''}"
+                                           f"blocked by cool-down ({cooldown_min} min) "
+                                           f"for '{spec.name or spec.kind}'"),
+                                    spec=spec
+                                )
+                            # fall through; we still persist the new status below
+                        else:
+                            # Proceed to send the email
                             recipients = list(spec.recipients) or list(res.get("recipients", []) or [])
                             if recipients:
                                 subj = f"ALERT [{cur_status}]: {self.host.table_name} — {spec.name or spec.kind}"
@@ -1151,6 +1340,8 @@ class AlertsTab(QWidget):
             self._refresh_badge()
             self._load_alerts_log()
         finally:
+            # Always reschedule based on the latest next_due map
+            self._reschedule_master_timer()
             self._eval_running = False
 
     def _log_quiet(self, msg: str):
@@ -1198,7 +1389,7 @@ class AlertsTab(QWidget):
 
         by_condition = df["condition"].value_counts().sort_index()
         emails_sent = int((df["condition"] == "email:sent").sum())
-        emails_skipped = int((df["condition"] == "email:skipped").sum())
+        emails_skipped = int((df["condition"] == "email:skipped").sum() + (df["condition"] == "email:skipped_window").sum())
         transitions = int(df["condition"].str.startswith("transition:").sum())
         flags_raised = int((df["condition"] == "flag:raise").sum())
         flags_cleared = int((df["condition"] == "flag:clear").sum())
@@ -1227,7 +1418,7 @@ class AlertsTab(QWidget):
                 for cond, cnt in by_condition.items():
                     f.write(f"#   {cond}: {int(cnt)}\n")
                 f.write(f"#\n# Emails sent: {emails_sent}\n")
-                f.write(f"# Emails skipped (cooldown): {emails_skipped}\n")
+                f.write(f"# Emails skipped (cooldown/window): {emails_skipped}\n")
                 f.write(f"# Transitions: {transitions}\n")
                 f.write(f"# Flags raised: {flags_raised}\n")
                 f.write(f"# Flags cleared: {flags_cleared}\n")
@@ -1274,8 +1465,8 @@ class AlertsTab(QWidget):
         if t_min <= 0:
             legacy_ms = int(data.get("timer_ms", 300000))  # default to 5 min if absent
             t_min = max(1, int(round(legacy_ms / 60000)))
-        self._timer_min = t_min
-        self.timer.setInterval(max(60_000, int(self._timer_min) * 60_000))
+        self._timer_min = t_min  # kept for backward compatibility (export)
+        # The adaptive scheduler ignores fixed interval; still store for export/import parity.
 
         self.specs = [AlertSpec.from_dict(d) for d in data.get("items", [])]
         # Purge any orphaned state rows so badge and checkboxes match the current set.
@@ -1285,3 +1476,4 @@ class AlertsTab(QWidget):
             pass
         self.refresh_table()
         self._load_alerts_log()
+        self._reschedule_master_timer()

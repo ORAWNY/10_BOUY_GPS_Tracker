@@ -1,9 +1,11 @@
-# Create_tabs.py
 import datetime
-import pandas as pd
+import os
+import time
+import sqlite3
+import traceback
 from typing import Optional
-import os, time, sqlite3, traceback
 
+import pandas as pd
 
 from PyQt6.QtCore import Qt, QTime, QDateTime, QTimer, QDate, QPoint
 from PyQt6.QtGui import QTextCharFormat, QBrush, QColor, QIcon, QPixmap, QPainter, QPen
@@ -13,86 +15,15 @@ from PyQt6.QtWidgets import (
     QToolButton, QInputDialog, QFrame, QStackedLayout, QSizePolicy,
     QStackedWidget, QSplitter, QHBoxLayout, QListWidget, QListWidgetItem
 )
-import uuid
-
 
 from utils.alerts.alerts_tab import AlertsTab
 from utils.chart_board import ChartBoard
-# Ensure alert types self-register
+# Ensure alert types self-register (imported for side-effects)
 from utils.alerts import distance_alert, threshold_alert, stale_alert, REGISTRY
-from utils.time_settings import local_zone, offset_label, parse_series_to_local_naive
-from utils.time_settings import get_config
+from utils.time_settings import local_zone, parse_series_to_local_naive, get_config
 
 
-
-
-def _clean_db_path(p) -> str:
-    """Make sure the DB path is a clean, normal Windows path."""
-    if not isinstance(p, (str, os.PathLike)):
-        p = str(p)
-    p = os.fspath(p)
-    # strip wrapping quotes/whitespace and normalize separators
-    p = p.strip().strip('"').strip("'")
-    p = os.path.normpath(p)
-    return p
-
-def _connect_db(db_path: str, *, ro: bool = False) -> sqlite3.Connection:
-    """Open SQLite robustly; try URI fallback on Windows if needed."""
-    p = _clean_db_path(db_path)
-    try:
-        if ro:
-            # explicit read-only prevents accidental file creation
-            return sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-        return sqlite3.connect(p)
-    except OSError as e:
-        # Errno 22: try a simpler URI open as a fallback
-        if getattr(e, "errno", None) == 22:
-            return sqlite3.connect(f"file:{p}", uri=True)
-        raise
-
-
-
-# --- put near top of Create_tabs.py (after imports) ---
-def _make_legacy_board(db_path: str):
-    """Adapter with .tiles -> objects that expose .config().table"""
-    class _Cfg:
-        def __init__(self, table): self.table = table
-
-    class _Tile:
-        def __init__(self, table): self._table = table
-        def config(self): return _Cfg(self._table)
-
-    class _Board:
-        def __init__(self, tables): self.tiles = [ _Tile(t) for t in tables ]
-
-    return _Board(_list_user_tables(db_path))
-
-
-def _make_summary_page(parent, db_path: str, alerts_provider):
-    """
-    Try the new utils.summary_page.SummaryPage API first,
-    then the old API, and finally fall back to our local SummaryTab.
-    """
-    try:
-        from utils.summary_page import SummaryPage as SP
-        try:
-            # NEW API
-            return SP(db_path=db_path, alerts_provider=alerts_provider, parent=parent)
-        except TypeError:
-            # OLD API
-            from utils.time_settings import get_config
-            return SP(
-                get_config(),                # cfg
-                alerts_provider,             # alerts_provider
-                _make_legacy_board(db_path), # board
-                db_path,                     # db_path
-                parent                       # parent
-            )
-    except Exception as e:
-        # Anything goes wrong? Use our minimal, safe SummaryTab.
-        print(f"[SummaryPage] falling back to local SummaryTab: {e!r}")
-        return SummaryTab(db_path)
-
+# ---------------- SQLite helpers ----------------
 
 def _connect_sqlite_robust(db_path: str, retries: int = 5, base_sleep: float = 0.2) -> sqlite3.Connection:
     """
@@ -118,13 +49,54 @@ def _connect_sqlite_robust(db_path: str, retries: int = 5, base_sleep: float = 0
     raise last_err or RuntimeError("SQLite connect failed")
 
 
-
-
 def _local_tzinfo():
     return local_zone()
 
-def _utc_offset_label() -> str:
-    return offset_label()
+
+def _make_legacy_board(db_path: str):
+    """Adapter with .tiles -> objects that expose .config().table (for old SummaryPage API)."""
+    class _Cfg:
+        def __init__(self, table):
+            self.table = table
+
+    class _Tile:
+        def __init__(self, table):
+            self._table = table
+
+        def config(self):
+            return _Cfg(self._table)
+
+    class _Board:
+        def __init__(self, tables):
+            self.tiles = [_Tile(t) for t in tables]
+
+    return _Board(_list_user_tables(db_path))
+
+
+def _make_summary_page(parent, db_path: str, alerts_provider):
+    """
+    Try the new utils.summary_page.SummaryPage API first,
+    then the old API, and finally fall back to our local SummaryTab.
+    """
+    try:
+        from utils.summary_page import SummaryPage as SP
+        try:
+            # NEW API
+            return SP(db_path=db_path, alerts_provider=alerts_provider, parent=parent)
+        except TypeError:
+            # OLD API
+            return SP(
+                get_config(),                # cfg
+                alerts_provider,             # alerts_provider
+                _make_legacy_board(db_path), # board
+                db_path,                     # db_path
+                parent                       # parent
+            )
+    except Exception as e:
+        # Anything goes wrong? Use our minimal, safe SummaryTab.
+        print(f"[SummaryPage] falling back to local SummaryTab: {e!r}")
+        return SummaryTab(db_path)
+
 
 # -------- Overlay panel (semi-invisible arrows + center “＋”) ----------
 class _BoardOverlay(QWidget):
@@ -152,7 +124,6 @@ class _BoardOverlay(QWidget):
         self._last_zone: str | None = None
         self._hide_armed = False
 
-
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(120)
@@ -162,7 +133,9 @@ class _BoardOverlay(QWidget):
         self.center_plus.setText("＋")
         self.center_plus.setToolTip("Add chart")
         self.center_plus.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.center_plus.clicked.connect(lambda: self.on_add_chart_center() if self.on_add_chart_center else None)
+        self.center_plus.clicked.connect(
+            lambda: self.on_add_chart_center() if self.on_add_chart_center else None
+        )
         self.center_plus.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
 
         self.edge_widgets = {}
@@ -174,6 +147,7 @@ class _BoardOverlay(QWidget):
             move_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             move_btn.setVisible(False)
             move_btn.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
+
             add_btn = QToolButton(self)
             add_btn.setText("＋")
             add_btn.setFixedSize(22, 22)
@@ -181,8 +155,12 @@ class _BoardOverlay(QWidget):
             add_btn.setVisible(False)
             add_btn.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
 
-            move_btn.clicked.connect(lambda e=None, d=edge: self.on_move_edge.get(d, lambda: None)())
-            add_btn.clicked.connect(lambda e=None, d=edge: self.on_add_edge.get(d, lambda: None)())
+            move_btn.clicked.connect(
+                lambda e=None, d=edge: self.on_move_edge.get(d, lambda: None)()
+            )
+            add_btn.clicked.connect(
+                lambda e=None, d=edge: self.on_add_edge.get(d, lambda: None)()
+            )
 
             self.edge_widgets[edge] = {"move": move_btn, "add": add_btn}
 
@@ -200,10 +178,21 @@ class _BoardOverlay(QWidget):
         self.center_plus.setGeometry(cx - 20, cy - 20, 40, 40)
 
         pad = 6
-        up = self.edge_widgets["up"];    up["move"].move(cx - 28, r.top() + pad);           up["add"].move(cx + 4,  r.top() + pad + 3)
-        down = self.edge_widgets["down"];down["move"].move(cx - 28, r.bottom() - 28 - pad); down["add"].move(cx + 4, r.bottom() - 28 - pad + 3)
-        left = self.edge_widgets["left"];left["move"].move(r.left() + pad, cy - 28);        left["add"].move(r.left() + pad + 3, cy + 4)
-        right = self.edge_widgets["right"]; right["move"].move(r.right() - 28 - pad, cy - 28); right["add"].move(r.right() - 28 - pad + 3, cy + 4)
+        up = self.edge_widgets["up"]
+        up["move"].move(cx - 28, r.top() + pad)
+        up["add"].move(cx + 4, r.top() + pad + 3)
+
+        down = self.edge_widgets["down"]
+        down["move"].move(cx - 28, r.bottom() - 28 - pad)
+        down["add"].move(cx + 4, r.bottom() - 28 - pad + 3)
+
+        left = self.edge_widgets["left"]
+        left["move"].move(r.left() + pad, cy - 28)
+        left["add"].move(r.left() + pad + 3, cy + 4)
+
+        right = self.edge_widgets["right"]
+        right["move"].move(r.right() - 28 - pad, cy - 28)
+        right["add"].move(r.right() - 28 - pad + 3, cy + 4)
 
     def enterEvent(self, e):
         self._hide_timer.stop()
@@ -227,8 +216,10 @@ class _BoardOverlay(QWidget):
         if not self._hide_armed:
             return
         for edge in self.edge_widgets.values():
-            if edge["move"].isVisible(): edge["move"].setVisible(False)
-            if edge["add"].isVisible():  edge["add"].setVisible(False)
+            if edge["move"].isVisible():
+                edge["move"].setVisible(False)
+            if edge["add"].isVisible():
+                edge["add"].setVisible(False)
         self._last_zone = None
         self._hide_armed = False
         self.update()
@@ -241,10 +232,14 @@ class _BoardOverlay(QWidget):
         r = self.rect()
         margin = 40
         zone = None
-        if pos.y() < margin: zone = "up"
-        elif pos.y() > r.height() - margin: zone = "down"
-        elif pos.x() < margin: zone = "left"
-        elif pos.x() > r.width() - margin: zone = "right"
+        if pos.y() < margin:
+            zone = "up"
+        elif pos.y() > r.height() - margin:
+            zone = "down"
+        elif pos.x() < margin:
+            zone = "left"
+        elif pos.x() > r.width() - margin:
+            zone = "right"
 
         if zone == self._last_zone:
             return
@@ -252,8 +247,10 @@ class _BoardOverlay(QWidget):
 
         for k, pair in self.edge_widgets.items():
             want = (k == zone)
-            if pair["move"].isVisible() != want: pair["move"].setVisible(want)
-            if pair["add"].isVisible()  != want: pair["add"].setVisible(want)
+            if pair["move"].isVisible() != want:
+                pair["move"].setVisible(want)
+            if pair["add"].isVisible() != want:
+                pair["add"].setVisible(want)
         self.update()
 
 
@@ -265,6 +262,7 @@ def _find_column_case(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
         if name in lower:
             return lower[name]
     return None
+
 
 def _last_known_lat_lon(df: pd.DataFrame, dt_col: Optional[str]) -> tuple[Optional[float], Optional[float]]:
     if df.empty:
@@ -288,6 +286,7 @@ def _last_known_lat_lon(df: pd.DataFrame, dt_col: Optional[str]) -> tuple[Option
     except Exception:
         return None, None
 
+
 def _list_user_tables(db_path: str) -> list[str]:
     try:
         with _connect_sqlite_robust(db_path) as conn:
@@ -300,16 +299,15 @@ def _list_user_tables(db_path: str) -> list[str]:
         return []
 
 
-
 # ---------------- TableTab (per-project) ----------------
 class TableTab(QWidget):
     """
     Per-table workspace:
-      - Project overview (summary + configurable ChartBoard)
-      - Charts (filters + configurable ChartBoard)
+      - Charts (project info + filters + configurable ChartBoard)
       - Alerts
       - trailing “＋” to add custom tabs (filters + board)
     """
+
     def __init__(self, db_path: str, table_name: str):
         super().__init__()
         self.db_path = db_path
@@ -326,8 +324,8 @@ class TableTab(QWidget):
         self.ov_start_val: QLabel | None = None
         self.ov_now_val: QLabel | None = None
         self.ov_last_val: QLabel | None = None
+        self.ov_since_val: QLabel | None = None
 
-        self.overview_board: ChartBoard | None = None
         self.charts_board: ChartBoard | None = None
         self.extra_tabs: list[tuple[str, ChartBoard]] = []
 
@@ -357,10 +355,6 @@ class TableTab(QWidget):
             return True
         except Exception:
             return False
-
-    def _parse_dt_flex_best(self, s: pd.Series) -> pd.Series:
-        # only convert tz-aware ones to local, and return tz-naive local datetimes.
-        return parse_series_to_local_naive(s)
 
     def _choose_best_datetime_column(self) -> tuple[Optional[str], Optional[pd.Series]]:
         """
@@ -424,50 +418,45 @@ class TableTab(QWidget):
         outer_layout = QVBoxLayout(self)
         self.inner_tabs = QTabWidget(self)
 
-        # ===== Project overview =====
-        overview_tab = QWidget(self)
-        overview_v = QVBoxLayout(overview_tab)
+        # ===== Charts (now also shows project info) =====
+        charts_tab = QWidget(self)
+        charts_v = QVBoxLayout(charts_tab)
 
+        # --- Project info row ---
         dates = QGridLayout()
         self.ov_start_val = QLabel("—")
         self.ov_now_val = QLabel("—")
         self.ov_last_val = QLabel("—")
         self.ov_since_val = QLabel("—")
 
-        dates.addWidget(QLabel("Start date:"), 0, 0);
+        dates.addWidget(QLabel("Start date:"), 0, 0)
         dates.addWidget(self.ov_start_val, 0, 1)
-        # Removed the explicit UTC offset label here
-        dates.addWidget(QLabel("Current date:"), 0, 2);
+
+        dates.addWidget(QLabel("Current date:"), 0, 2)
         dates.addWidget(self.ov_now_val, 0, 3)
 
-        dates.addWidget(QLabel("Last data received:"), 1, 0);
+        dates.addWidget(QLabel("Last data received:"), 1, 0)
         dates.addWidget(self.ov_last_val, 1, 1)
-        dates.addWidget(QLabel("Time since last email/avg:"), 1, 2);
+        dates.addWidget(QLabel("Time since last email/avg:"), 1, 2)
         dates.addWidget(self.ov_since_val, 1, 3)
 
-        overview_v.addLayout(dates)
+        charts_v.addLayout(dates)
 
-        ov_scroll, self.overview_board, self._overview_overlay = self._build_board_with_overlay()
-        overview_v.addWidget(ov_scroll)
+        # --- Filters + ChartBoard ---
+        filters = self._build_filters_widget(charts_tab, primary=True)
 
-        # ===== Charts =====
-        charts_tab = QWidget(self)
-        charts_v = QVBoxLayout(charts_tab)
-
-        filters = self._build_filters_widget(charts_tab)
         charts_v.addWidget(filters)
 
         charts_scroll, self.charts_board, self._charts_overlay = self._build_board_with_overlay()
         charts_v.addWidget(charts_scroll)
 
-        # Alerts
+        # Alerts tab
         self.alerts_tab = AlertsTab(self, self.db_path, logger=None)
 
-        self.inner_tabs.addTab(overview_tab, "Project overview")
+        # Tabs: Charts, Alerts, ＋
         self.inner_tabs.addTab(charts_tab, "Charts")
         self.inner_tabs.addTab(self.alerts_tab, "Alerts")
 
-        # Trailing “＋” tab
         self.plus_tab = QWidget(self)
         self.inner_tabs.addTab(self.plus_tab, "＋")
         self.inner_tabs.currentChanged.connect(self._maybe_add_new_tab)
@@ -475,6 +464,7 @@ class TableTab(QWidget):
         outer_layout.addWidget(self.inner_tabs)
         self.setLayout(outer_layout)
 
+        # Timers + labels + calendar shading
         self.init_timer()
         self.update_time_labels()
         self._refresh_overview()
@@ -541,17 +531,21 @@ class TableTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(container)
-        # critical so the scroll area doesn’t enforce a large minimum
         scroll.setMinimumSize(0, 0)
         scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         return scroll, board, overlay
 
-    def _sync_overlay_visibility(self, board: ChartBoard | None, _stack: QStackedLayout,
-                                 overlay: _BoardOverlay | None = None):
+    def _sync_overlay_visibility(
+        self,
+        board: ChartBoard | None,
+        _stack: QStackedLayout,
+        overlay: _BoardOverlay | None = None,
+    ):
         try:
             if not board:
-                if overlay: overlay.set_empty(True)
+                if overlay:
+                    overlay.set_empty(True)
                 return
             state = board.export_state()
             has_any = False
@@ -560,59 +554,96 @@ class TableTab(QWidget):
                     has_any = len(state["charts"]) > 0
                 elif "rows" in state and isinstance(state["rows"], list):
                     has_any = any(len(r.get("charts", [])) > 0 for r in state["rows"])
-            if overlay: overlay.set_empty(not has_any)
+            if overlay:
+                overlay.set_empty(not has_any)
         except Exception:
-            if overlay: overlay.set_empty(True)
+            if overlay:
+                overlay.set_empty(True)
 
-    def _board_add_chart(self, board: ChartBoard | None):
-        if not board: return
-        if hasattr(board, "_add_chart_dialog"):
-            board._add_chart_dialog()
-        elif hasattr(board, "add_chart"):
-            board.add_chart()
-        else:
-            QMessageBox.information(self, "Add chart", "This board doesn't expose an add-chart API.")
-
-    def _board_add_row(self, board: ChartBoard | None, above: bool):
-        if not board: return
-        if hasattr(board, "_add_row_internal"):
-            board._add_row_internal()
-        elif hasattr(board, "add_row"):
-            board.add_row(position=("above" if above else "below"))
-        else:
-            self._board_add_chart(board)
-
-    def _build_filters_widget(self, parent: QWidget):
+    def _build_filters_widget(self, parent: QWidget, *, primary: bool) -> QGroupBox:
         box = QGroupBox("Filters", parent)
         h = QHBoxLayout(box)
 
-        self.start_date_edit = QDateEdit(parent); self.start_date_edit.setCalendarPopup(True)
-        self.end_date_edit   = QDateEdit(parent); self.end_date_edit.setCalendarPopup(True)
+        # Create *local* widgets
+        start_date_edit = QDateEdit(parent)
+        start_date_edit.setCalendarPopup(True)
+        end_date_edit = QDateEdit(parent)
+        end_date_edit.setCalendarPopup(True)
 
+        # Initialise from detected data range if available
         if self.start_datetime is not None and pd.notna(self.start_datetime):
             sd = QDate(self.start_datetime.year, self.start_datetime.month, self.start_datetime.day)
-            self.start_date_edit.setDate(sd)
+            start_date_edit.setDate(sd)
         if self.end_datetime is not None and pd.notna(self.end_datetime):
             ed = QDate(self.end_datetime.year, self.end_datetime.month, self.end_datetime.day)
-            self.end_date_edit.setDate(ed)
+            end_date_edit.setDate(ed)
 
-        self.start_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
-        self.start_time_slider.setRange(0, 86399); self.start_time_slider.setValue(0)
-        self.end_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
-        self.end_time_slider.setRange(0, 86399); self.end_time_slider.setValue(86399)
-        self.start_time_label = QLabel("00:00:00", parent)
-        self.end_time_label = QLabel("23:59:59", parent)
+        start_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
+        start_time_slider.setRange(0, 86399)
+        start_time_slider.setValue(0)
 
-        h.addWidget(QLabel("Start Date:", parent)); h.addWidget(self.start_date_edit)
-        h.addWidget(QLabel("Start Time:", parent)); h.addWidget(self.start_time_slider); h.addWidget(self.start_time_label)
+        end_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
+        end_time_slider.setRange(0, 86399)
+        end_time_slider.setValue(86399)
+
+        start_time_label = QLabel("00:00:00", parent)
+        end_time_label = QLabel("23:59:59", parent)
+
+        h.addWidget(QLabel("Start Date:", parent))
+        h.addWidget(start_date_edit)
+        h.addWidget(QLabel("Start Time:", parent))
+        h.addWidget(start_time_slider)
+        h.addWidget(start_time_label)
         h.addSpacing(12)
-        h.addWidget(QLabel("End Date:", parent)); h.addWidget(self.end_date_edit)
-        h.addWidget(QLabel("End Time:", parent)); h.addWidget(self.end_time_slider); h.addWidget(self.end_time_label)
+        h.addWidget(QLabel("End Date:", parent))
+        h.addWidget(end_date_edit)
+        h.addWidget(QLabel("End Time:", parent))
+        h.addWidget(end_time_slider)
+        h.addWidget(end_time_label)
 
-        self.start_date_edit.dateChanged.connect(self.on_date_time_changed)
-        self.end_date_edit.dateChanged.connect(self.on_date_time_changed)
-        self.start_time_slider.valueChanged.connect(self.on_time_slider_changed)
-        self.end_time_slider.valueChanged.connect(self.on_time_slider_changed)
+        if primary:
+            # These are the canonical widgets used by get_datetime_from_widgets()
+            self.start_date_edit = start_date_edit
+            self.end_date_edit = end_date_edit
+            self.start_time_slider = start_time_slider
+            self.end_time_slider = end_time_slider
+            self.start_time_label = start_time_label
+            self.end_time_label = end_time_label
+
+            start_date_edit.dateChanged.connect(self.on_date_time_changed)
+            end_date_edit.dateChanged.connect(self.on_date_time_changed)
+            start_time_slider.valueChanged.connect(self.on_time_slider_changed)
+            end_time_slider.valueChanged.connect(self.on_time_slider_changed)
+        else:
+            # Extra tabs: keep them in sync with the primary filters
+
+            # If primary widgets already exist, mirror their current values into this set
+            if self._alive(self.start_date_edit):
+                start_date_edit.setDate(self.start_date_edit.date())
+            if self._alive(self.end_date_edit):
+                end_date_edit.setDate(self.end_date_edit.date())
+            if self._alive(self.start_time_slider):
+                start_time_slider.setValue(self.start_time_slider.value())
+            if self._alive(self.end_time_slider):
+                end_time_slider.setValue(self.end_time_slider.value())
+
+            def push_to_primary():
+                # If the primary widgets exist, copy values into them.
+                if not (self._alive(self.start_date_edit) and self._alive(self.end_date_edit)
+                        and self._alive(self.start_time_slider) and self._alive(self.end_time_slider)):
+                    return
+                self.start_date_edit.setDate(start_date_edit.date())
+                self.end_date_edit.setDate(end_date_edit.date())
+                self.start_time_slider.setValue(start_time_slider.value())
+                self.end_time_slider.setValue(end_time_slider.value())
+                # Changing the primary widgets will fire their signals and call
+                # on_date_time_changed/on_time_slider_changed, which refresh charts.
+
+            start_date_edit.dateChanged.connect(lambda *_: push_to_primary())
+            end_date_edit.dateChanged.connect(lambda *_: push_to_primary())
+            start_time_slider.valueChanged.connect(lambda *_: push_to_primary())
+            end_time_slider.valueChanged.connect(lambda *_: push_to_primary())
+
         return box
 
     def _maybe_add_new_tab(self, index: int):
@@ -628,7 +659,7 @@ class TableTab(QWidget):
 
         tab = QWidget(self)
         v = QVBoxLayout(tab)
-        filters_box = self._build_filters_widget(tab)
+        filters_box = self._build_filters_widget(tab, primary=False)
         v.addWidget(filters_box)
         scroll, board, _overlay = self._build_board_with_overlay()
         v.addWidget(scroll)
@@ -665,7 +696,6 @@ class TableTab(QWidget):
         self.ov_now_val = None
         self.ov_last_val = None
         self.ov_since_val = None
-        self.overview_board = None
         self.charts_board = None
         self.inner_tabs = None
 
@@ -721,11 +751,17 @@ class TableTab(QWidget):
         except Exception:
             pass
 
-        # Refresh boards if present
-        for b in (self.overview_board, self.charts_board):
+        # Refresh boards if present (charts + extra tabs)
+        boards = []
+        if self.charts_board:
+            boards.append(self.charts_board)
+        for _name, board in self.extra_tabs:
+            if board:
+                boards.append(board)
+
+        for b in boards:
             try:
-                if b:
-                    b.refresh_all()
+                b.refresh_all()
             except Exception:
                 pass
 
@@ -784,7 +820,11 @@ class TableTab(QWidget):
         return ts.to_pydatetime()
 
     def _refresh_overview(self):
-        if not (self._alive(self.ov_start_val) and self._alive(self.ov_now_val) and self._alive(self.ov_last_val)):
+        if not (
+            self._alive(self.ov_start_val)
+            and self._alive(self.ov_now_val)
+            and self._alive(self.ov_last_val)
+        ):
             return
 
         # Pull times
@@ -818,14 +858,18 @@ class TableTab(QWidget):
                 if not diffs.empty:
                     mean_td = diffs.mean()
                     # pandas Timedelta -> python timedelta
-                    avg_td = (mean_td.to_pytimedelta()
-                              if hasattr(mean_td, "to_pytimedelta")
-                              else datetime.timedelta(seconds=float(mean_td.total_seconds())))
+                    avg_td = (
+                        mean_td.to_pytimedelta()
+                        if hasattr(mean_td, "to_pytimedelta")
+                        else datetime.timedelta(seconds=float(mean_td.total_seconds()))
+                    )
             except Exception:
                 avg_td = None
 
             if self._alive(self.ov_since_val):
-                self.ov_since_val.setText(f"{self._format_timedelta(since_td)} / {self._format_timedelta(avg_td)}")
+                self.ov_since_val.setText(
+                    f"{self._format_timedelta(since_td)} / {self._format_timedelta(avg_td)}"
+                )
         else:
             self.ov_start_val.setText("—")
             self.ov_last_val.setText("—")
@@ -836,19 +880,37 @@ class TableTab(QWidget):
         if not (self._alive(self.start_date_edit) and self._alive(self.end_date_edit)):
             return
         self.update_time_labels()
-        for b in (self.charts_board, self.overview_board):
-            if b:
-                try: b.refresh_all()
-                except Exception: pass
+
+        boards = []
+        if self.charts_board:
+            boards.append(self.charts_board)
+        for _name, board in self.extra_tabs:
+            if board:
+                boards.append(board)
+
+        for b in boards:
+            try:
+                b.refresh_all()
+            except Exception:
+                pass
 
     def on_time_slider_changed(self):
         if not (self._alive(self.start_time_slider) and self._alive(self.end_time_slider)):
             return
         self.update_time_labels()
-        for b in (self.charts_board, self.overview_board):
-            if b:
-                try: b.refresh_all()
-                except Exception: pass
+
+        boards = []
+        if self.charts_board:
+            boards.append(self.charts_board)
+        for _name, board in self.extra_tabs:
+            if board:
+                boards.append(board)
+
+        for b in boards:
+            try:
+                b.refresh_all()
+            except Exception:
+                pass
 
     def update_time_labels(self):
         if not (self._alive(self.start_time_slider) and self._alive(self.end_time_slider)):
@@ -859,9 +921,13 @@ class TableTab(QWidget):
             self.end_time_slider.setValue(start_secs)
             end_secs = start_secs
         if self._alive(self.start_time_label):
-            self.start_time_label.setText(QTime(0, 0).addSecs(start_secs).toString("HH:mm:ss"))
+            self.start_time_label.setText(
+                QTime(0, 0).addSecs(start_secs).toString("HH:mm:ss")
+            )
         if self._alive(self.end_time_label):
-            self.end_time_label.setText(QTime(0, 0).addSecs(end_secs).toString("HH:mm:ss"))
+            self.end_time_label.setText(
+                QTime(0, 0).addSecs(end_secs).toString("HH:mm:ss")
+            )
 
     def get_datetime_from_widgets(self):
         if self._alive(self.start_date_edit):
@@ -898,10 +964,13 @@ class TableTab(QWidget):
             return
 
         data_dates = set(dt.dt.date)
-        fmt_no_data = QTextCharFormat(); fmt_no_data.setBackground(QBrush(QColor(200, 200, 200)))
-        fmt_with_data = QTextCharFormat(); fmt_with_data.setBackground(QBrush(QColor(144, 238, 144)))
+        fmt_no_data = QTextCharFormat()
+        fmt_no_data.setBackground(QBrush(QColor(200, 200, 200)))
+        fmt_with_data = QTextCharFormat()
+        fmt_with_data.setBackground(QBrush(QColor(144, 238, 144)))
 
-        min_date = min(data_dates); max_date = max(data_dates)
+        min_date = min(data_dates)
+        max_date = max(data_dates)
         current_date = min_date
         while current_date <= max_date:
             qd = QDate(current_date.year, current_date.month, current_date.day)
@@ -915,44 +984,62 @@ class TableTab(QWidget):
 
     # Persistence (per-tab boards)
     def export_charts_settings(self) -> dict:
+        """
+        Keep the old shape: {"overview": ..., "charts": ..., "extra": [...]}
+        even though we no longer have an overview board. This keeps old
+        JSON/settings compatible.
+        """
         payload = {"overview": {}, "charts": {}, "extra": []}
         try:
-            if self.overview_board: payload["overview"] = self.overview_board.export_state()
-        except Exception: pass
-        try:
-            if self.charts_board: payload["charts"] = self.charts_board.export_state()
-        except Exception: pass
+            if self.charts_board:
+                payload["charts"] = self.charts_board.export_state()
+        except Exception:
+            pass
         for name, board in getattr(self, "extra_tabs", []):
-            try: payload["extra"].append({"name": name, "state": board.export_state()})
-            except Exception: pass
+            try:
+                payload["extra"].append({"name": name, "state": board.export_state()})
+            except Exception:
+                pass
         return payload
 
     def import_charts_settings(self, data: dict):
-        if not data: return
-        if isinstance(data, dict) and ("rows" in data or "row_sizes" in data) and "charts" not in data:
-            try:
-                if self.charts_board: self.charts_board.import_state(data)
-            except Exception: pass
+        if not data:
             return
 
-        ov = data.get("overview"); ch = data.get("charts"); extra = data.get("extra") or []
+        # Old flat format: a single board state
+        if isinstance(data, dict) and ("rows" in data or "row_sizes" in data) and "charts" not in data:
+            try:
+                if self.charts_board:
+                    self.charts_board.import_state(data)
+            except Exception:
+                pass
+            return
+
+        # New structured format
+        ch = data.get("charts")
+        extra = data.get("extra") or []
+
         try:
-            if ov is not None and self.overview_board: self.overview_board.import_state(ov)
-        except Exception: pass
-        try:
-            if ch is not None and self.charts_board: self.charts_board.import_state(ch)
-        except Exception: pass
+            if ch is not None and self.charts_board:
+                self.charts_board.import_state(ch)
+        except Exception:
+            pass
 
         for item in extra:
             try:
                 tab_name = (item.get("name") or "Custom").strip() or "Custom"
                 state = item.get("state") or {}
-                tab = QWidget(self); v = QVBoxLayout(tab)
-                filters_box = self._build_filters_widget(tab); v.addWidget(filters_box)
-                scroll, board, _overlay = self._build_board_with_overlay(); v.addWidget(scroll)
+                tab = QWidget(self)
+                v = QVBoxLayout(tab)
+                filters_box = self._build_filters_widget(tab, primary=False)
+                v.addWidget(filters_box)
+                scroll, board, _overlay = self._build_board_with_overlay()
+                v.addWidget(scroll)
                 if board:
-                    try: board.import_state(state)
-                    except Exception: pass
+                    try:
+                        board.import_state(state)
+                    except Exception:
+                        pass
                     self.extra_tabs.append((tab_name, board))
                 plus_idx = self.inner_tabs.count() - 1
                 self.inner_tabs.insertTab(plus_idx, tab, tab_name)
@@ -1040,25 +1127,37 @@ class SummaryTab(QWidget):
         box = QGroupBox("Filters", parent)
         h = QHBoxLayout(box)
 
-        self.start_date_edit = QDateEdit(parent); self.start_date_edit.setCalendarPopup(True)
-        self.end_date_edit   = QDateEdit(parent); self.end_date_edit.setCalendarPopup(True)
+        self.start_date_edit = QDateEdit(parent)
+        self.start_date_edit.setCalendarPopup(True)
+        self.end_date_edit = QDateEdit(parent)
+        self.end_date_edit.setCalendarPopup(True)
 
         today = QDate.currentDate()
         self.start_date_edit.setDate(today)
         self.end_date_edit.setDate(today)
 
         self.start_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
-        self.start_time_slider.setRange(0, 86399); self.start_time_slider.setValue(0)
+        self.start_time_slider.setRange(0, 86399)
+        self.start_time_slider.setValue(0)
+
         self.end_time_slider = QSlider(Qt.Orientation.Horizontal, parent)
-        self.end_time_slider.setRange(0, 86399); self.end_time_slider.setValue(86399)
+        self.end_time_slider.setRange(0, 86399)
+        self.end_time_slider.setValue(86399)
+
         self.start_time_label = QLabel("00:00:00", parent)
         self.end_time_label = QLabel("23:59:59", parent)
 
-        h.addWidget(QLabel("Start Date:", parent)); h.addWidget(self.start_date_edit)
-        h.addWidget(QLabel("Start Time:", parent)); h.addWidget(self.start_time_slider); h.addWidget(self.start_time_label)
+        h.addWidget(QLabel("Start Date:", parent))
+        h.addWidget(self.start_date_edit)
+        h.addWidget(QLabel("Start Time:", parent))
+        h.addWidget(self.start_time_slider)
+        h.addWidget(self.start_time_label)
         h.addSpacing(12)
-        h.addWidget(QLabel("End Date:", parent)); h.addWidget(self.end_date_edit)
-        h.addWidget(QLabel("End Time:", parent)); h.addWidget(self.end_time_slider); h.addWidget(self.end_time_label)
+        h.addWidget(QLabel("End Date:", parent))
+        h.addWidget(self.end_date_edit)
+        h.addWidget(QLabel("End Time:", parent))
+        h.addWidget(self.end_time_slider)
+        h.addWidget(self.end_time_label)
 
         self.start_date_edit.dateChanged.connect(self._filters_changed)
         self.end_date_edit.dateChanged.connect(self._filters_changed)
@@ -1071,16 +1170,21 @@ class SummaryTab(QWidget):
         self._debounce.start()
 
     def _update_time_labels(self):
-        if not self.start_time_slider or not self.end_time_slider: return
+        if not self.start_time_slider or not self.end_time_slider:
+            return
         start_secs = self.start_time_slider.value()
         end_secs = self.end_time_slider.value()
         if end_secs < start_secs:
             self.end_time_slider.setValue(start_secs)
             end_secs = start_secs
         if self.start_time_label:
-            self.start_time_label.setText(QTime(0, 0).addSecs(start_secs).toString("HH:mm:ss"))
+            self.start_time_label.setText(
+                QTime(0, 0).addSecs(start_secs).toString("HH:mm:ss")
+            )
         if self.end_time_label:
-            self.end_time_label.setText(QTime(0, 0).addSecs(end_secs).toString("HH:mm:ss"))
+            self.end_time_label.setText(
+                QTime(0, 0).addSecs(end_secs).toString("HH:mm:ss")
+            )
 
     def _get_widget_dt_range(self):
         sd = self.start_date_edit.date() if self.start_date_edit else QDate.currentDate()
@@ -1088,16 +1192,18 @@ class SummaryTab(QWidget):
         ss = self.start_time_slider.value() if self.start_time_slider else 0
         es = self.end_time_slider.value() if self.end_time_slider else 86399
         start_dt = QDateTime(sd, QTime(0, 0).addSecs(ss)).toPyDateTime()
-        end_dt   = QDateTime(ed, QTime(0, 0).addSecs(es)).toPyDateTime()
+        end_dt = QDateTime(ed, QTime(0, 0).addSecs(es)).toPyDateTime()
         return start_dt, end_dt
 
     # ---------- Cards ----------
     def _rebuild_cards(self):
-        if not self.cards_layout: return
+        if not self.cards_layout:
+            return
         while self.cards_layout.count():
             it = self.cards_layout.takeAt(0)
             w = it.widget()
-            if w: w.deleteLater()
+            if w:
+                w.deleteLater()
 
         start_dt, end_dt = self._get_widget_dt_range()
         row = col = 0
@@ -1108,11 +1214,14 @@ class SummaryTab(QWidget):
             self.cards_layout.addWidget(card, row, col)
             col += 1
             if col >= max_cols:
-                col = 0; row += 1
+                col = 0
+                row += 1
 
     def _make_project_card(self, table_name: str, start_dt, end_dt) -> QGroupBox:
         df = self._read_minimal_df(table_name)
-        start_s = end_s = "—"; count = 0; lat = lon = None
+        start_s = end_s = "—"
+        count = 0
+        lat = lon = None
 
         if not df.empty:
             name, parsed = self._choose_best_datetime_column_for_df(df)
@@ -1126,24 +1235,26 @@ class SummaryTab(QWidget):
                     if not dff.empty:
                         count = int(dff.shape[0])
                         start_s = dff["__dt_iso_tmp"].min().strftime("%Y-%m-%d %H:%M:%S")
-                        end_s   = dff["__dt_iso_tmp"].max().strftime("%Y-%m-%d %H:%M:%S")
+                        end_s = dff["__dt_iso_tmp"].max().strftime("%Y-%m-%d %H:%M:%S")
                         lat, lon = _last_known_lat_lon(dff, "__dt_iso_tmp")
 
         box = QGroupBox(table_name, self)
         g = QGridLayout(box)
+
         def add_row(r, label, value):
             g.addWidget(QLabel(label), r, 0)
-            v = QLabel(value); v.setStyleSheet("font-weight:600;")
+            v = QLabel(value)
+            v.setStyleSheet("font-weight:600;")
             g.addWidget(v, r, 1)
 
-        add_row(0, "First:",  start_s)
-        add_row(1, "Last:",   end_s)
-        add_row(2, "Count:",  f"{count}")
+        add_row(0, "First:", start_s)
+        add_row(1, "Last:", end_s)
+        add_row(2, "Count:", f"{count}")
         add_row(3, "Lat/Lon:", "" if lat is None or lon is None else f"{lat:.5f}, {lon:.5f}")
         return box
 
     def _read_minimal_df(self, table_name: str) -> pd.DataFrame:
-        cand_dt  = ["timestamp", "received_time", "datetime", "time", "date"]
+        cand_dt = ["timestamp", "received_time", "datetime", "time", "date"]
         cand_lat = ["lat", "latitude", "lat_dd", "lat_deg"]
         cand_lon = ["lon", "longitude", "long", "lon_dd", "lon_deg"]
 
@@ -1154,11 +1265,17 @@ class SummaryTab(QWidget):
 
             sel = []
             for c in cand_dt:
-                if c in lower: sel.append(lower[c]); break
+                if c in lower:
+                    sel.append(lower[c])
+                    break
             for c in cand_lat:
-                if c in lower: sel.append(lower[c]); break
+                if c in lower:
+                    sel.append(lower[c])
+                    break
             for c in cand_lon:
-                if c in lower: sel.append(lower[c]); break
+                if c in lower:
+                    sel.append(lower[c])
+                    break
             if not sel:
                 sel = cols[:1]
 
@@ -1185,9 +1302,14 @@ class SummaryTab(QWidget):
             cands.append(pd.to_datetime(raw, errors="coerce", dayfirst=True, utc=True, format="mixed"))
         except Exception:
             cands.append(pd.to_datetime(raw, errors="coerce", dayfirst=True, utc=True))
-        for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
-                    "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M"):
+        for fmt in (
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%d-%m-%Y %H:%M:%S",
+            "%d-%m-%Y %H:%M",
+        ):
             try:
                 cands.append(pd.to_datetime(raw, format=fmt, errors="coerce", utc=True))
             except Exception:
@@ -1209,11 +1331,13 @@ class SummaryTab(QWidget):
         return pd.to_datetime(best, errors="coerce")
 
     def _choose_best_datetime_column_for_df(self, df: pd.DataFrame) -> tuple[Optional[str], Optional[pd.Series]]:
-        if df.empty: return None, None
+        if df.empty:
+            return None, None
         preferred = ["timestamp", "received_time", "datetime", "time", "date"]
         cols = list(df.columns)
         trial = []
-        if cols: trial.append(cols[0])
+        if cols:
+            trial.append(cols[0])
         lower_map = {c.lower(): c for c in cols}
         for name in preferred:
             if name in lower_map and lower_map[name] not in trial:
@@ -1229,7 +1353,9 @@ class SummaryTab(QWidget):
             parsed = s if pd.api.types.is_datetime64_any_dtype(s) else self._parse_dt_flex_best(s)
             ok = int(parsed.notna().sum())
             if ok > best_ok:
-                best_ok = ok; best_col = c; best_series = parsed
+                best_ok = ok
+                best_col = c
+                best_series = parsed
         if best_series is None or best_ok <= 0:
             return None, None
         return best_col, best_series
@@ -1237,10 +1363,13 @@ class SummaryTab(QWidget):
     def _shade_calendar_dates(self):
         # Optional: mark today just so calendars aren't blank
         try:
-            fmt_with_data = QTextCharFormat(); fmt_with_data.setBackground(QBrush(QColor(144, 238, 144)))
+            fmt_with_data = QTextCharFormat()
+            fmt_with_data.setBackground(QBrush(QColor(144, 238, 144)))
             today = QDate.currentDate()
-            if self.start_date_edit: self.start_date_edit.calendarWidget().setDateTextFormat(today, fmt_with_data)
-            if self.end_date_edit:   self.end_date_edit.calendarWidget().setDateTextFormat(today, fmt_with_data)
+            if self.start_date_edit:
+                self.start_date_edit.calendarWidget().setDateTextFormat(today, fmt_with_data)
+            if self.end_date_edit:
+                self.end_date_edit.calendarWidget().setDateTextFormat(today, fmt_with_data)
         except Exception:
             pass
 
@@ -1305,12 +1434,10 @@ class ProjectsView(QWidget):
         self.summary_page = None
 
         # ⬇️ Build pages now (after widgets exist)
-        # in ProjectsView.__init__
         try:
             self._rebuild_with_retry()
         except Exception as e:
             tb = traceback.format_exc(limit=8)
-            # Keep the original error; don’t force errno 22
             raise RuntimeError(
                 f"ProjectsView initial build failed ({type(e).__name__}): {e}\n{tb}"
             ) from e
@@ -1374,8 +1501,7 @@ class ProjectsView(QWidget):
         """
         Bridge used by SummaryPage tiles to pull info from Alerts/Charts.
         """
-        from utils.alerts.store import count_flagged, read_last_status
-        # We keep read_last_status flexible: it may return a string or (status, observed)
+        from utils.alerts.store import count_flagged
 
         class _API:
             def __init__(self, outer):
@@ -1391,7 +1517,8 @@ class ProjectsView(QWidget):
             # ---- Alerts ----
             def list_alerts(self, table: str):
                 tab = self._tab(table)
-                if not tab: return []
+                if not tab:
+                    return []
                 at = getattr(tab, "alerts_tab", None)
                 if not at or not getattr(at, "specs", None):
                     return []
@@ -1477,9 +1604,6 @@ class ProjectsView(QWidget):
                     return
                 at.configure_spec(spec)
 
-
-
-            # inside class _API in _project_api()
             def alert_status(self, table: str, key: str):
                 tab = self._tab(table)
                 if not tab:
@@ -1505,7 +1629,6 @@ class ProjectsView(QWidget):
                         "status": status_str,  # e.g. "GREEN" / "AMBER" / "RED" / "OFF"
                         "observed": res.get("observed", None),
                         "summary": res.get("summary", "") or "",
-                        # optional hint; SummaryTile doesn't rely on it but it's harmless to include
                         "active": status_str not in ("GREEN", "OFF"),
                     }
                 except Exception:
@@ -1517,12 +1640,11 @@ class ProjectsView(QWidget):
                 except Exception:
                     return 0
 
-
-
             # ---- Charts ----
             def list_charts(self, table: str):
                 tab = self._tab(table)
-                if not tab: return []
+                if not tab:
+                    return []
                 board = getattr(tab, "charts_board", None)
                 if not board or not hasattr(board, "export_state"):
                     return []
@@ -1612,14 +1734,17 @@ class ProjectsView(QWidget):
             except Exception:
                 c = 0
             counts[t] = c
-            total += c  # instead of calling _count_flagged again
+            total += c
 
         # Row 0 is "Summary"
         if self.list.count() > 0:
             sum_item = self.list.item(0)
             sum_item.setIcon(self._flag_icon(total > 0))
             tip_lines = [f"{t}: {n}" for t, n in counts.items()]
-            sum_item.setToolTip(f"Total flagged: {total}\n" + ("\n".join(tip_lines) if tip_lines else ""))
+            sum_item.setToolTip(
+                f"Total flagged: {total}\n"
+                + ("\n".join(tip_lines) if tip_lines else "")
+            )
 
         # Table rows: 1..N
         for i in range(1, self.list.count()):
@@ -1637,7 +1762,6 @@ class ProjectsView(QWidget):
                 self.summary_page._refresh_badge()
         except Exception:
             pass
-
 
     def _rebuild_once(self):
         self.list.clear()
@@ -1665,4 +1789,3 @@ class ProjectsView(QWidget):
             self.list.addItem(item)
             self.pages.addWidget(TableTab(db_path=self.db_path, table_name=t))
         self._refresh_project_flags()
-
