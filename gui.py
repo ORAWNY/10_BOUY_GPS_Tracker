@@ -988,6 +988,23 @@ class MainWindow(QMainWindow):
             self.activity.start("Refreshing data…")
             try:
                 self.projects_view.refresh_data_light()
+                # after light refresh, evaluate alerts now (so transitions/emails happen immediately)
+                for tname, page in self.projects_view.iter_tables():
+                    alerts_tab = getattr(page, "alerts_tab", None)
+                    if alerts_tab and hasattr(alerts_tab, "evaluate_all"):
+                        try:
+                            alerts_tab.evaluate_all(load_history=False)  # recommended
+                        except TypeError:
+                            alerts_tab.evaluate_all()
+
+                # Light-refresh SummaryPage from SQLite so it reflects parser changes
+                try:
+                    sp = getattr(self.projects_view, "summary_page", None)
+                    if sp and hasattr(sp, "refresh_light_from_db"):
+                        sp.refresh_light_from_db()
+                except Exception as e:
+                    self.activity.log(f"WARN: summary light refresh failed: {e}")
+
             except Exception:
                 # Fall back to the full rebuild if anything goes sideways
                 self.activity.log("Light refresh failed; rebuilding tabs.")
@@ -1379,8 +1396,16 @@ class MainWindow(QMainWindow):
                     widget.reload()
 
     def _on_parser_refresh_request(self, db_path: str, force: bool):
-        if force:
-            return
+        try:
+            if db_path and self.db_path:
+                if os.path.abspath(db_path) != os.path.abspath(self.db_path):
+                    self.activity.log(
+                        f"Parser refreshed a different DB; ignoring refresh. parser_db={db_path} current_db={self.db_path}")
+                    return
+        except Exception:
+            pass
+
+        # If force=True you might later decide to do a full rebuild; for now just refresh lightly.
         self.refresh_tabs_only()
 
     # -------------- Streamlit launcher --------------

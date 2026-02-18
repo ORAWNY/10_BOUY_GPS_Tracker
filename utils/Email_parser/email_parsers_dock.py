@@ -331,7 +331,7 @@ class EmailParserManager(QObject):
             core_run_parser(mp.core, logger=lambda s: self.log.emit(f"[{mp.name}] {s}"))
             self.log.emit(f"[{mp.name}] Update complete.")
             if mp.refresh_tabs:
-                self.request_refresh_tabs.emit(mp.core.db_path, False)
+                self.request_refresh_tabs.emit(mp.core.db_path, force_refresh)
             return
 
         except Exception as e:
@@ -344,7 +344,7 @@ class EmailParserManager(QObject):
                     core_run_parser(mp.core, logger=lambda s: self.log.emit(f"[{mp.name}] {s}"))
                     self.log.emit(f"[{mp.name}] Update complete after Outlook restart.")
                     if mp.refresh_tabs:
-                        self.request_refresh_tabs.emit(mp.core.db_path, False)
+                        self.request_refresh_tabs.emit(mp.core.db_path, force_refresh)
                     return
                 except Exception as e2:
                     self.log.emit(f"[{mp.name}] Retry failed after Outlook restart: {e2}")

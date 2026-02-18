@@ -238,6 +238,7 @@ class AlertsTab(QWidget):
         root.addWidget(self.history)
 
         # ---------- Timer ----------
+        self._eval_running = False
         self.timer = QTimer(self)
         self._timer_min = 15
         self.timer.setInterval(max(60_000, int(self._timer_min) * 60_000))
@@ -259,13 +260,15 @@ class AlertsTab(QWidget):
         else:
             self.add_default_seeds()
 
-        # initial paint & history
-        self.refresh_table()
-        self._load_alerts_log()
-
         # eval guard + banner
         self._eval_running = False
         self.quiet_refresh_logs = True
+
+        # initial paint & history
+        self.refresh_table()
+        self._load_alerts_log()
+        QTimer.singleShot(0, self.evaluate_all)
+
         self._log_quiet(f"AlertsTab ready ({self._timer_min} min interval)")
 
     def _clear_alerts_history(self):
@@ -289,6 +292,30 @@ class AlertsTab(QWidget):
             self._write_alerts_log(condition="history:cleared", notes="User cleared history")
         except Exception as e:
             QMessageBox.critical(self, "Clear history error", str(e))
+
+    def on_host_data_updated(self):
+        """
+        Call this when the parser refreshes host.df.
+        Lightweight: refreshes only live summary cells and recolors status.
+        Does NOT rebuild the table or reload history.
+        """
+        # Update Summary column only (uses live evaluate)
+        for r, spec in enumerate(self.specs):
+            try:
+                res = REGISTRY[spec.kind].evaluate(spec, self.host)
+                summary = res.get("summary", "")
+            except Exception:
+                summary = ""
+            item = self.table.item(r, self.COL_SUMMARY)
+            if item is None:
+                item = QTableWidgetItem(summary)
+                self.table.setItem(r, self.COL_SUMMARY, item)
+            else:
+                item.setText(summary)
+
+        # Status colors/text are based on persisted last_status (not live),
+        # so recolor is cheap and correct.
+        self._recolor_status_cells()
 
     def _debug_dump_flags(self):
         try:
@@ -798,13 +825,33 @@ class AlertsTab(QWidget):
     def _recolor_status_cells(self):
         for r in range(self.table.rowCount()):
             spec = self.specs[r]
-            status = Status.OFF
-            if spec.enabled:
-                try:
-                    status = REGISTRY[spec.kind].evaluate(spec, self.host).get("status", Status.OFF)
-                except Exception:
-                    status = Status.OFF
             item = self.table.item(r, self.COL_STATUS)
+
+            # Default: OFF when disabled
+            if not spec.enabled:
+                status = Status.OFF
+            else:
+                # Show the *persisted* status (the one used for transitions/emails),
+                # not a fresh live evaluate() result.
+                key = self._key_for(spec)
+                last = None
+                try:
+                    last = read_last_status(self.db_path, self.host.table_name, key)
+                except Exception:
+                    last = None
+
+                if last:
+                    try:
+                        status = Status(last)
+                    except Exception:
+                        status = Status.OFF
+                else:
+                    # If we have no baseline yet, do a one-off evaluate to show something sensible.
+                    try:
+                        status = REGISTRY[spec.kind].evaluate(spec, self.host).get("status", Status.OFF)
+                    except Exception:
+                        status = Status.OFF
+
             item.setText(_status_text(status, spec.enabled))
             color = _status_color(status, spec.enabled)
             item.setForeground(QBrush(QColor("#ffffff")))
@@ -930,7 +977,8 @@ class AlertsTab(QWidget):
         self.refresh_table()
 
     # -------- Evaluation loop --------
-    def evaluate_all(self):
+    def evaluate_all(self, load_history: bool = True):
+
         if self._eval_running:
             return
         self._eval_running = True
@@ -1053,16 +1101,22 @@ class AlertsTab(QWidget):
                         )
 
                     # ---------- Email policy ----------
-                    cooldown_min = int(spec.payload.get("email_cooldown_min", 240))  # default 4h
-                    email_on_escalation = bool(spec.payload.get("email_on_escalation", False))
+                    cooldown_min = int(spec.payload.get("email_cooldown_min", 240))
+
+                    email_on_amber = bool(spec.payload.get("email_on_amber", True))
+                    email_on_red = bool(spec.payload.get("email_on_red", True))
+                    email_on_escalation = bool(spec.payload.get("email_on_escalation", True))
                     email_on_recovery = bool(spec.payload.get("email_on_recovery", False))
 
-                    entered_alert = (prev_status in ("OFF", "GREEN") and cur_status in ("AMBER", "RED"))
+                    entered_amber = (prev_status in ("OFF", "GREEN") and cur_status == "AMBER")
+                    entered_red = (prev_status in ("OFF", "GREEN") and cur_status == "RED")
                     escalated = (prev_status == "AMBER" and cur_status == "RED")
                     recovered = (prev_status in ("AMBER", "RED") and cur_status == "GREEN")
 
                     should_consider_email = False
-                    if entered_alert:
+                    if entered_amber and email_on_amber:
+                        should_consider_email = True
+                    elif entered_red and email_on_red:
                         should_consider_email = True
                     elif escalated and email_on_escalation:
                         should_consider_email = True
@@ -1123,6 +1177,7 @@ class AlertsTab(QWidget):
                                 )
                                 try:
                                     send_email_outlook(subj, body, recipients, None)
+                                    self._log(f"[alerts] Email sent → {', '.join(recipients)} | {spec.name}")
                                     write_last_email(self.db_path, self.host.table_name, key, cur_status)
                                     self._write_alerts_log(
                                         condition="email:sent",
@@ -1149,7 +1204,9 @@ class AlertsTab(QWidget):
 
             self._recolor_status_cells()
             self._refresh_badge()
-            self._load_alerts_log()
+            if load_history:
+                self._load_alerts_log()
+
         finally:
             self._eval_running = False
 

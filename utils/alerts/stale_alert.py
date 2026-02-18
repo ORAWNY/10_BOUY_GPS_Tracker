@@ -24,15 +24,20 @@ def fmt_duration(secs: float) -> str:
     d, r = divmod(secs, 86400)
     h, r = divmod(r, 3600)
     m, s = divmod(r, 60)
-    if d: return f"{d}d {h:02d}h {m:02d}m {s:02d}s"
-    if h: return f"{h}h {m:02d}m {s:02d}s"
+    if d:
+        return f"{d}d {h:02d}h {m:02d}m {s:02d}s"
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
 
 
 class _Editor(QDialog):
     """
-    Editor now supports 'Also check table(s)' — a comma/space/semicolon separated
-    list of *other* email tables to co-monitor with this one.
+    Editor supports:
+      - thresholds
+      - recipients / interval
+      - cooldown + email toggles (amber/red/escalation/recovery)
+      - also_tables (co-monitor other tables)
     """
     def __init__(self, spec: AlertSpec, host: Host, parent=None):
         super().__init__(parent)
@@ -41,7 +46,8 @@ class _Editor(QDialog):
         self.setWindowTitle("Stale-data alert")
 
         lay = QVBoxLayout(self)
-        form = QFormLayout(); lay.addLayout(form)
+        form = QFormLayout()
+        lay.addLayout(form)
 
         p = self.spec.payload or {}
 
@@ -54,15 +60,22 @@ class _Editor(QDialog):
         amber_default = int(p.get("amber_min", old_thr))
         red_default = int(p.get("red_min", max(amber_default * 2, 60)))
 
-        self.thr_amber = QSpinBox(); self.thr_amber.setRange(1, 10_000_000); self.thr_amber.setValue(amber_default)
-        self.thr_red   = QSpinBox(); self.thr_red.setRange(1, 10_000_000);   self.thr_red.setValue(red_default)
-        self.scope_all = QCheckBox("Use ALL data (alert on maximum gap)"); self.scope_all.setChecked(bool(p.get("scope_all", False)))
+        self.thr_amber = QSpinBox()
+        self.thr_amber.setRange(1, 10_000_000)
+        self.thr_amber.setValue(amber_default)
+
+        self.thr_red = QSpinBox()
+        self.thr_red.setRange(1, 10_000_000)
+        self.thr_red.setValue(red_default)
+
+        self.scope_all = QCheckBox("Use ALL data (alert on maximum gap)")
+        self.scope_all.setChecked(bool(p.get("scope_all", False)))
 
         form.addRow("AMBER at (minutes) ≥", self.thr_amber)
         form.addRow("RED at (minutes) ≥", self.thr_red)
         form.addRow(self.scope_all)
 
-        # ---- NEW: Additional tables to co-monitor ----
+        # Additional tables
         also_tables = ", ".join(p.get("also_tables", []))
         self.also_tables_edit = QLineEdit(also_tables)
         self.also_tables_edit.setPlaceholderText("e.g. support_inbox, accounts_inbox")
@@ -72,17 +85,37 @@ class _Editor(QDialog):
         existing_rcpts = self.spec.recipients or p.get("recipients", [])
         self.recipients_edit = QLineEdit(", ".join(existing_rcpts))
         self.recipients_edit.setPlaceholderText("alice@company.com, bob@company.com")
-        self.interval_spin = QSpinBox(); self.interval_spin.setRange(1, 100000); self.interval_spin.setValue(int(p.get("interval_min", 15)))
+
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(1, 100000)
+        self.interval_spin.setValue(int(p.get("interval_min", 15)))
+
         form.addRow("Email recipients:", self.recipients_edit)
         form.addRow("Check interval (min):", self.interval_spin)
 
         # Email throttle & toggles
-        self.cooldown_spin = QSpinBox(); self.cooldown_spin.setRange(0, 100000); self.cooldown_spin.setValue(int(p.get("email_cooldown_min", 240)))
-        self.escalation_combo = QComboBox(); self.escalation_combo.addItems(["No", "Yes"]); self.escalation_combo.setCurrentIndex(1 if p.get("email_on_escalation", True) else 0)
-        self.recovery_combo   = QComboBox(); self.recovery_combo.addItems(["No", "Yes"]);   self.recovery_combo.setCurrentIndex(1 if p.get("email_on_recovery", False) else 0)
+        self.cooldown_spin = QSpinBox()
+        self.cooldown_spin.setRange(0, 100000)
+        self.cooldown_spin.setValue(int(p.get("email_cooldown_min", 240)))
         form.addRow("Email cool-down (min):", self.cooldown_spin)
-        form.addRow("Email on escalation (AMBER→RED):", self.escalation_combo)
-        form.addRow("Email on recovery (→GREEN):", self.recovery_combo)
+
+        # NEW: email on AMBER / RED toggles
+        self.email_amber_cb = QCheckBox("Email when entering AMBER")
+        self.email_amber_cb.setChecked(bool(p.get("email_on_amber", True)))
+        form.addRow(self.email_amber_cb)
+
+        self.email_red_cb = QCheckBox("Email when entering RED")
+        self.email_red_cb.setChecked(bool(p.get("email_on_red", True)))
+        form.addRow(self.email_red_cb)
+
+        # Existing escalation/recovery toggles
+        self.escalation_cb = QCheckBox("Email on escalation (AMBER→RED)")
+        self.escalation_cb.setChecked(bool(p.get("email_on_escalation", True)))
+        form.addRow(self.escalation_cb)
+
+        self.recovery_cb = QCheckBox("Email on recovery (→GREEN)")
+        self.recovery_cb.setChecked(bool(p.get("email_on_recovery", False)))
+        form.addRow(self.recovery_cb)
 
         hint = QLabel(
             "Status logic (per-source): < AMBER → GREEN, ≥ AMBER & < RED → AMBER, ≥ RED → RED.\n"
@@ -92,7 +125,9 @@ class _Editor(QDialog):
         hint.setStyleSheet("color:#666; font-size:11px;")
         lay.addWidget(hint)
 
-        btn_ok = QPushButton("OK"); btn_ok.clicked.connect(self.accept); lay.addWidget(btn_ok)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(self.accept)
+        lay.addWidget(btn_ok)
 
     def accept(self):
         p = self.spec.payload or {}
@@ -106,29 +141,39 @@ class _Editor(QDialog):
                 self.spec.name = new_name
 
         # Thresholds
-        amber = int(self.thr_amber.value()); red = int(self.thr_red.value())
-        if red < amber: red = amber
+        amber = int(self.thr_amber.value())
+        red = int(self.thr_red.value())
+        if red < amber:
+            red = amber
         p["amber_min"] = amber
-        p["red_min"]   = red
+        p["red_min"] = red
         p["scope_all"] = bool(self.scope_all.isChecked())
         p["threshold_min"] = amber  # legacy key preserved
 
-        # NEW: also_tables
+        # also_tables
         raw_also = (self.also_tables_edit.text() or "").strip()
         parts = re.split(r"[,\s;]+", raw_also)
         also_tables = [t for t in (s.strip() for s in parts) if t]
         p["also_tables"] = also_tables
 
-        # Recipients, interval, cool-down, toggles
+        # Recipients
         raw = (self.recipients_edit.text() or "").strip()
         parts = re.split(r"[,\s;]+", raw)
         emails = [e for e in (s.strip() for s in parts) if e and "@" in e]
         self.spec.recipients = emails
         p["recipients"] = emails
+
+        # Scheduling / throttling / toggles
         p["interval_min"] = int(self.interval_spin.value())
         p["email_cooldown_min"] = int(self.cooldown_spin.value())
-        p["email_on_escalation"] = (self.escalation_combo.currentIndex() == 1)
-        p["email_on_recovery"]   = (self.recovery_combo.currentIndex() == 1)
+
+        # NEW toggles
+        p["email_on_amber"] = bool(self.email_amber_cb.isChecked())
+        p["email_on_red"] = bool(self.email_red_cb.isChecked())
+
+        # Existing toggles
+        p["email_on_escalation"] = bool(self.escalation_cb.isChecked())
+        p["email_on_recovery"] = bool(self.recovery_cb.isChecked())
 
         self.spec.payload = p
         super().accept()
@@ -136,7 +181,7 @@ class _Editor(QDialog):
 
 class StaleViewDialog(QDialog):
     """
-    Stale-data inspector (moved out of AlertsTab):
+    Stale-data inspector:
       • Top bar: Range, Refresh, thresholds readout, Edit thresholds…, Export…
       • Chart: gap (minutes) vs end time of each gap (last row can be now→last)
       • Table: End time (local), Gap (minutes), Status, Note
@@ -151,7 +196,7 @@ class StaleViewDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-        # ---- Top controls -------------------------------------------------
+        # ---- Top controls ----
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("Range:"))
         self.range_combo = QComboBox()
@@ -162,12 +207,13 @@ class StaleViewDialog(QDialog):
         self.refresh_btn.setText("⟳ Refresh")
         self.refresh_btn.clicked.connect(self._rebuild)
 
-        self.th_label = QLabel(" ")   # thresholds readout
-        self.mode_label = QLabel(" ") # mode readout
+        self.th_label = QLabel(" ")
+        self.mode_label = QLabel(" ")
 
         self.edit_btn = QToolButton()
         self.edit_btn.setText("⚙ Edit thresholds…")
         self.edit_btn.clicked.connect(self._on_edit)
+
         self.export_btn = QToolButton()
         self.export_btn.setText("⬇ Export report…")
         self.export_btn.clicked.connect(self._export_report)
@@ -183,7 +229,7 @@ class StaleViewDialog(QDialog):
         ctrl.addWidget(self.export_btn)
         lay.addLayout(ctrl)
 
-        # ---- Matplotlib canvas + toolbar ---------------------------------
+        # ---- Matplotlib canvas + toolbar ----
         self.fig = Figure(figsize=(8.4, 4.2), tight_layout=True)
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111)
@@ -191,7 +237,7 @@ class StaleViewDialog(QDialog):
         lay.addWidget(self.toolbar)
         lay.addWidget(self.canvas, 1)
 
-        # ---- Data table ---------------------------------------------------
+        # ---- Data table ----
         self.table = QTableWidget(0, 4, self)
         self.table.setHorizontalHeaderLabels(["End time (local)", "Gap (minutes)", "Status", "Note"])
         self.table.verticalHeader().setVisible(False)
@@ -199,7 +245,6 @@ class StaleViewDialog(QDialog):
 
         self._rebuild()
 
-    # ---------- helpers ----------
     def _window_td(self) -> Optional[pd.Timedelta]:
         m = {
             "6 h": pd.Timedelta(hours=6),
@@ -215,16 +260,16 @@ class StaleViewDialog(QDialog):
         p = self.spec.payload or {}
         amb = int(p.get("amber_min", p.get("threshold_min", 30)))
         red = int(p.get("red_min", max(amb * 2, 60)))
-        if red < amb: red = amb
+        if red < amb:
+            red = amb
         return amb, red, bool(p.get("scope_all", False))
 
     def _classify(self, gap_min: float, amber: int, red: int) -> str:
-        if gap_min >= red: return "RED"
-        if gap_min >= amber: return "AMBER"
+        if gap_min >= red:
+            return "RED"
+        if gap_min >= amber:
+            return "AMBER"
         return "GREEN"
-
-    def _series_local(self, s: pd.Series) -> pd.Series:
-        return parse_series_to_local_naive(s)
 
     def _build_gaps(self) -> pd.DataFrame:
         df = getattr(self.host, "df", None)
@@ -232,7 +277,7 @@ class StaleViewDialog(QDialog):
         if df is None or df.empty or not tcol or tcol not in df.columns:
             return pd.DataFrame(columns=["t_end", "gap_min", "status", "note"])
 
-        ts = self._series_local(df[tcol]).dropna().sort_values()
+        ts = parse_series_to_local_naive(df[tcol]).dropna().sort_values()
         if ts.empty:
             return pd.DataFrame(columns=["t_end", "gap_min", "status", "note"])
 
@@ -241,11 +286,9 @@ class StaleViewDialog(QDialog):
             t_end = ts.max()
             t_start = t_end - td
             ts = ts[(ts >= t_start) & (ts <= t_end)]
-            # allow “now gap” even with a single sample when not scope_all
 
         amber, red, scope_all = self._thresholds()
 
-        # historical gaps (consecutive)
         gaps_s = ts.diff().dropna().dt.total_seconds()
         out = pd.DataFrame({
             "t_end": ts.iloc[1:],
@@ -254,7 +297,6 @@ class StaleViewDialog(QDialog):
         out["status"] = out["gap_min"].map(lambda v: self._classify(float(v), amber, red))
         out["note"] = ""
 
-        # now→last gap (only when not scope_all)
         if not scope_all and len(ts) > 0:
             now_local = pd.Timestamp.now(tz=local_zone()).tz_localize(None)
             last_ts = ts.iloc[-1]
@@ -269,18 +311,11 @@ class StaleViewDialog(QDialog):
 
         return out.sort_values("t_end")
 
-    # ---------- actions ----------
     def _on_edit(self):
-        # Prefer the host app's editor path so audits/baselines are handled consistently.
         try:
             cfg = getattr(self._parent, "configure_spec", None)
             if callable(cfg):
                 cfg(self.spec)
-            else:
-                # Fallback: open the handler editor directly
-                dlg = REGISTRY[self.spec.kind].create_editor(self.spec, self.host, self)  # type: ignore[name-defined]
-                if dlg.exec():
-                    pass
         except Exception:
             pass
         self._rebuild()
@@ -310,7 +345,6 @@ class StaleViewDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Export error", str(e))
 
-    # ---------- main builder ----------
     def _rebuild(self):
         self.ax.clear()
 
@@ -325,7 +359,6 @@ class StaleViewDialog(QDialog):
             self.table.setRowCount(0)
             return
 
-        # Line of gaps over time
         self.ax.plot(d["t_end"], d["gap_min"], linewidth=2)
         self.ax.axhline(amber, color="#f59f00", linestyle="--", linewidth=1, label=f"AMBER {amber}m")
         self.ax.axhline(red, color="#f03e3e", linestyle="--", linewidth=1, label=f"RED {red}m")
@@ -344,7 +377,6 @@ class StaleViewDialog(QDialog):
         self.ax.legend(loc="best", fontsize=8)
         self.canvas.draw_idle()
 
-        # Table
         self.table.setRowCount(0)
         for _, row in d.iterrows():
             r_i = self.table.rowCount()
@@ -369,47 +401,45 @@ class StaleHandler(AlertHandler):
             payload={
                 "amber_min": 30,
                 "red_min": 60,
-                "scope_all": False,       # False → since last; True → max historical gap
+                "scope_all": False,
                 "interval_min": 15,
                 "email_cooldown_min": 240,
+
+                # NEW: end-user controls
+                "email_on_amber": True,
+                "email_on_red": True,
+
+                # Existing controls
                 "email_on_escalation": True,
                 "email_on_recovery": False,
+
                 "recipients": [],
-                "threshold_min": 30,      # legacy
-                "also_tables": [],        # NEW: other email tables to co-monitor
+                "threshold_min": 30,  # legacy
+                "also_tables": [],
             },
         )
 
     # ---------- Helpers ----------
     @staticmethod
     def _candidate_time_cols(prefer: Optional[str], all_cols: List[str]) -> List[str]:
-        """Choose likely datetime columns; prefer the current table's column name if present."""
         common = ["datetime", "timestamp", "ts", "created_at", "received_at", "date", "sent", "received"]
-        ordered = []
+        ordered: List[str] = []
         if prefer and prefer in all_cols:
             ordered.append(prefer)
         for c in common:
             if c in all_cols and c != prefer:
                 ordered.append(c)
-        # keep any remaining string-like columns as last resort
         for c in all_cols:
             if c not in ordered:
                 ordered.append(c)
         return ordered
 
-    def _load_times_for_table(
-        self, db_path: Optional[str], table: str, prefer_col: Optional[str]
-    ) -> pd.Series:
-        """
-        Load a pandas Series of local-naive datetimes for a named table.
-        Tries to be robust even if we don't know the exact datetime column name.
-        """
+    def _load_times_for_table(self, db_path: Optional[str], table: str, prefer_col: Optional[str]) -> pd.Series:
         if not db_path or not os.path.isfile(db_path):
             return pd.Series(dtype="datetime64[ns]")
 
         try:
             conn = sqlite3.connect(db_path)
-            # discover columns
             cur = conn.cursor()
             cur.execute(f"PRAGMA table_info({table})")
             rows = cur.fetchall()
@@ -423,10 +453,8 @@ class StaleHandler(AlertHandler):
                     q = f'SELECT "{col}" AS dt FROM "{table}" WHERE "{col}" IS NOT NULL ORDER BY 1 ASC'
                     s = pd.read_sql_query(q, conn)["dt"]
                     conn.close()
-                    # parse to local-naive consistently with primary table
                     return parse_series_to_local_naive(s).dropna().sort_values()
                 except Exception:
-                    # try next candidate
                     conn.rollback()
                     continue
             conn.close()
@@ -437,10 +465,6 @@ class StaleHandler(AlertHandler):
 
     @staticmethod
     def _combine_observed(observed_list: List[Tuple[str, float]]) -> float:
-        """
-        Combine observed seconds across multiple tables by taking the minimum (best freshness).
-        If list is empty, return 0 to force GREEN? Better: return +inf → caller handles 'no valid'.
-        """
         if not observed_list:
             return float("inf")
         return min(x for _, x in observed_list)
@@ -459,7 +483,6 @@ class StaleHandler(AlertHandler):
         return _Editor(spec, host, parent)
 
     def create_viewer(self, spec: AlertSpec, host: Host, parent=None) -> QDialog:
-        """New: provide the Stale 'preview' dialog from the handler (used by AlertsTab.view_selected)."""
         return StaleViewDialog(spec, host, parent)
 
     # ---------- Core evaluation ----------
@@ -467,8 +490,6 @@ class StaleHandler(AlertHandler):
         df = getattr(host, "df", None)
         tcol = getattr(host, "datetime_col", None)
 
-        # Primary table times
-        primary_ts: pd.Series
         if df is None or df.empty or not tcol or tcol not in (df.columns if df is not None else []):
             primary_ts = pd.Series(dtype="datetime64[ns]")
         else:
@@ -476,22 +497,20 @@ class StaleHandler(AlertHandler):
 
         p = spec.payload or {}
         amber_min = int(p.get("amber_min", p.get("threshold_min", 30)))
-        red_min   = int(p.get("red_min", max(amber_min * 2, 60)))
-        if red_min < amber_min: red_min = amber_min
+        red_min = int(p.get("red_min", max(amber_min * 2, 60)))
+        if red_min < amber_min:
+            red_min = amber_min
         amber_s = float(amber_min * 60)
-        red_s   = float(red_min   * 60)
+        red_s = float(red_min * 60)
 
         scope_all = bool(p.get("scope_all", False))
 
-        # Gather observed seconds for the primary + any additional tables
         observed_parts: List[Tuple[str, float]] = []
         primary_obs = self._observed_for_series(primary_ts, scope_all)
         if primary_obs != float("inf"):
             observed_parts.append((getattr(host, "table_name", "this_table"), primary_obs))
 
         also_tables: List[str] = list(p.get("also_tables", [])) or []
-
-        # Try to resolve DB path for cross-table reads
         db_path = getattr(host, "db_path", None) or os.environ.get("BUOY_DB") or None
 
         for tname in also_tables:
@@ -500,14 +519,11 @@ class StaleHandler(AlertHandler):
             if obs != float("inf"):
                 observed_parts.append((tname, obs))
 
-        # If nothing usable, turn OFF
         if not observed_parts:
             return {"status": Status.OFF, "observed": 0.0, "summary": "no valid times in any selected table"}
 
-        # Combine by taking the best (lowest) staleness
         combined_observed = self._combine_observed(observed_parts)
 
-        # Status from combined_observed
         if combined_observed >= red_s:
             status = Status.RED
         elif combined_observed >= amber_s:
@@ -519,13 +535,10 @@ class StaleHandler(AlertHandler):
         interval_min = int(p.get("interval_min", 15))
         cooldown = int(p.get("email_cooldown_min", 240))
 
-        # Build a compact per-table breakdown for the summary
-        parts = []
-        for name, secs in observed_parts:
-            parts.append(f"{name}:{fmt_duration(secs)}")
+        parts = [f"{name}:{fmt_duration(secs)}" for name, secs in observed_parts]
         per_table = " | ".join(parts)
-
         mode_str = "max gap" if scope_all else "since last"
+
         summary = (
             f"{fmt_duration(combined_observed)} (amber≥{fmt_duration(amber_s)}, red≥{fmt_duration(red_s)}) • "
             f"{mode_str} • sources={len(observed_parts)} [{per_table}] • "
@@ -536,7 +549,7 @@ class StaleHandler(AlertHandler):
 
         return {
             "status": status,
-            "observed": combined_observed,  # seconds
+            "observed": combined_observed,
             "summary": summary,
             "extra": {
                 "amber_min": amber_min,

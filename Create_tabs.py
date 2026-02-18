@@ -18,8 +18,15 @@ import uuid
 
 from utils.alerts.alerts_tab import AlertsTab
 from utils.chart_board import ChartBoard
-# Ensure alert types self-register
-from utils.alerts import distance_alert, threshold_alert, stale_alert, REGISTRY
+
+# Ensure alert types self-register (side-effect imports)
+from utils.alerts import distance_alert, threshold_alert, stale_alert, REGISTRY  # noqa: F401
+
+# Extra-safe explicit module imports (fixes: "Stale handler not registered. Import utils.alerts.stale_alert")
+import utils.alerts.distance_alert  # noqa: F401
+import utils.alerts.threshold_alert  # noqa: F401
+import utils.alerts.stale_alert  # noqa: F401
+
 from utils.time_settings import local_zone, offset_label, parse_series_to_local_naive
 from utils.time_settings import get_config
 
@@ -335,6 +342,9 @@ class TableTab(QWidget):
 
         self.df = self.load_data()
         self.datetime_col: str | None = None
+        self._src_datetime_col: str | None = None  # NEW: true SQLite datetime column name
+        self._last_loaded_dt: Optional[pd.Timestamp] = None  # NEW: marker for incremental ingest
+
         self.start_datetime = None
         self.end_datetime = None
 
@@ -344,6 +354,15 @@ class TableTab(QWidget):
             if not col.empty:
                 self.start_datetime = col.min()
                 self.end_datetime = col.max()
+
+        # NEW: initialize last-loaded marker
+        try:
+            if self.datetime_col and self.datetime_col in self.df.columns:
+                s = self.df[self.datetime_col].dropna()
+                if not s.empty:
+                    self._last_loaded_dt = pd.Timestamp(s.max())
+        except Exception:
+            self._last_loaded_dt = None
 
         self.init_ui()
         self.destroyed.connect(self._cleanup)
@@ -419,6 +438,69 @@ class TableTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "DB Error", f"Failed to load table {self.table_name}:\n{e}")
             return pd.DataFrame()
+
+    # NEW: Incremental ingest of ONLY new rows (fast + avoids reloading old data)
+    def ingest_new_rows(self) -> bool:
+        """
+        Append ONLY new rows since the last-loaded datetime into self.df.
+        Returns True if new rows were appended.
+        """
+        if not self._src_datetime_col:
+            return False
+        if self._last_loaded_dt is None or pd.isna(self._last_loaded_dt):
+            return False
+
+        try:
+            with _connect_sqlite_robust(self.db_path) as conn:
+                q = (
+                    f'SELECT * FROM "{self.table_name}" '
+                    f'WHERE "{self._src_datetime_col}" IS NOT NULL AND "{self._src_datetime_col}" > ? '
+                    f'ORDER BY "{self._src_datetime_col}" ASC'
+                )
+                # Note: param uses string form; works well when the column is stored as ISO-like text.
+                df_new = pd.read_sql_query(q, conn, params=[str(self._last_loaded_dt)])
+        except Exception:
+            return False
+
+        if df_new is None or df_new.empty:
+            return False
+
+        # Build the working datetime column for the new rows
+        try:
+            df_new["__dt_iso"] = parse_series_to_local_naive(df_new[self._src_datetime_col])
+        except Exception:
+            df_new["__dt_iso"] = pd.to_datetime(df_new.get(self._src_datetime_col), errors="coerce")
+
+        # Merge + keep ordering stable
+        try:
+            self.df = pd.concat([self.df, df_new], ignore_index=True)
+            if "__dt_iso" in self.df.columns:
+                self.df = self.df.sort_values(by="__dt_iso", kind="stable").reset_index(drop=True)
+
+            mx = self.df["__dt_iso"].dropna() if "__dt_iso" in self.df.columns else pd.Series(dtype="datetime64[ns]")
+            if not mx.empty:
+                self._last_loaded_dt = pd.Timestamp(mx.max())
+        except Exception:
+            return False
+
+        # Light UI refresh (no teardown)
+        try:
+            self._refresh_overview()
+        except Exception:
+            pass
+        try:
+            for b in (self.overview_board, self.charts_board):
+                if b:
+                    b.refresh_all()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "alerts_tab") and hasattr(self.alerts_tab, "refresh"):
+                self.alerts_tab.refresh()
+        except Exception:
+            pass
+
+        return True
 
     def init_ui(self):
         outer_layout = QVBoxLayout(self)
@@ -673,14 +755,20 @@ class TableTab(QWidget):
         name, parsed = self._choose_best_datetime_column()
         if name is None or parsed is None or parsed.notna().sum() == 0:
             self.datetime_col = None
+            self._src_datetime_col = None
+            self._last_loaded_dt = None
             return
+
+        self._src_datetime_col = name  # NEW
         self.df["__dt_iso"] = parsed
         self.datetime_col = "__dt_iso"
+
         try:
             non_na = parsed.dropna()
             if not non_na.empty:
                 self.start_datetime = non_na.min()
                 self.end_datetime = non_na.max()
+                self._last_loaded_dt = pd.Timestamp(non_na.max())
         except Exception:
             pass
 
@@ -1002,6 +1090,13 @@ class SummaryTab(QWidget):
 
         # build UI
         self._init_ui()
+
+    # NEW: public refresh hook used by ProjectsView DB watcher
+    def refresh(self):
+        try:
+            self._rebuild_cards()
+        except Exception:
+            pass
 
     # ---------- UI ----------
     def _init_ui(self):
@@ -1327,6 +1422,48 @@ class ProjectsView(QWidget):
         self._flags_timer.start()
         self._refresh_project_flags()
         self._count_flagged_fn = self._resolve_count_flagged()
+
+        # NEW: DB mtime watcher -> incremental ingest only new datapoints
+        self._db_mtime = 0.0
+        self._db_watch = QTimer(self)
+        self._db_watch.setInterval(1500)  # "live" without thrashing
+        self._db_watch.timeout.connect(self._on_db_watch_tick)
+        self._db_watch.start()
+
+    def _on_db_watch_tick(self):
+        try:
+            m = os.path.getmtime(self.db_path)
+        except Exception:
+            return
+
+        if m <= float(self._db_mtime or 0.0):
+            return
+
+        self._db_mtime = float(m)
+
+        # Per-table incremental ingest
+        for _name, tab in self.iter_tables():
+            try:
+                if hasattr(tab, "ingest_new_rows"):
+                    tab.ingest_new_rows()
+            except Exception:
+                pass
+
+        # Summary refresh (if supported)
+        try:
+            if getattr(self, "summary_page", None):
+                if hasattr(self.summary_page, "refresh"):
+                    self.summary_page.refresh()
+                elif hasattr(self.summary_page, "_rebuild_cards"):
+                    self.summary_page._rebuild_cards()
+        except Exception:
+            pass
+
+        # Flag badges
+        try:
+            self._refresh_project_flags()
+        except Exception:
+            pass
 
     # keep a compatibility wrapper
     def _rebuild(self):
@@ -1665,4 +1802,3 @@ class ProjectsView(QWidget):
             self.list.addItem(item)
             self.pages.addWidget(TableTab(db_path=self.db_path, table_name=t))
         self._refresh_project_flags()
-
