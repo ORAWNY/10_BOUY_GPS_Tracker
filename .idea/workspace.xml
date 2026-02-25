@@ -5,12 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="09848a77-3268-4985-958e-47189ff9bc8f" name="Changes" comment="updated_commit_24092025">
+      <change afterPath="$PROJECT_DIR$/resource/styles/dark.qss" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/resource/styles/light.qss" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Create_tabs.py" beforeDir="false" afterPath="$PROJECT_DIR$/Create_tabs.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/Email_parser/email_parsers_dock.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/Email_parser/email_parsers_dock.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/alerts/alerts_tab.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/alerts/alerts_tab.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/alerts/stale_alert.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/alerts/stale_alert.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/settings_dialog.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/settings_dialog.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils/summary_page.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/summary_page.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -94,6 +93,7 @@
 }</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="D:\04_Met_Ocean\02_Python\10_BOUY_GPS_Tracker\resource\styles" />
       <recent name="D:\04_Met_Ocean\02_Python\10_BOUY_GPS_Tracker\utils" />
       <recent name="D:\04_Met_Ocean\02_Python\10_BOUY_GPS_Tracker\utils\Chart_building_util" />
       <recent name="D:\04_Met_Ocean\02_Python\10_BOUY_GPS_Tracker" />

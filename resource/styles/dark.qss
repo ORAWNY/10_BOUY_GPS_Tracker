@@ -1,0 +1,95 @@
+/* ===== Dark Theme ===== */
+QWidget {
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+    color: #e5e7eb;
+    background: #0b1220;
+}
+
+QToolBar {
+    background: #111827;
+    border: 0px;
+    spacing: 6px;
+    padding: 6px;
+}
+
+QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+QToolButton:hover {
+    border: 1px solid #334155;
+    background: #0f172a;
+}
+
+QPushButton {
+    background: #0ea5e9;
+    color: #ffffff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+QPushButton:hover { background: #0284c7; }
+QPushButton:pressed { background: #0369a1; }
+
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #e5e7eb;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
+QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus {
+    border: 1px solid #0ea5e9;
+}
+
+/* Tables */
+QTableView, QTableWidget {
+    background: #111827;
+    alternate-background-color: #0f172a;
+    color: #e5e7eb;
+    gridline-color: #334155;
+    border: 1px solid #334155;
+}
+
+/* IMPORTANT: do NOT force QTableWidget::item color globally */
+
+QHeaderView::section {
+    background: #0f172a;
+    color: #e5e7eb;
+    border: 1px solid #334155;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+
+QTabWidget::pane {
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px;
+    background: #111827;
+}
+QTabBar::tab {
+    background: #0f172a;
+    color: #e5e7eb;
+    padding: 8px 14px;
+    border: 1px solid #334155;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 4px;
+}
+QTabBar::tab:selected {
+    background: #111827;
+}
+
+QToolTip {
+    color: #0b1220;
+    background: #e5e7eb;
+    border: 0px;
+    padding: 6px 8px;
+    border-radius: 6px;
+}

@@ -14,8 +14,9 @@ from PyQt6.QtWidgets import (
     QFileDialog, QLabel, QMessageBox,
     QMenuBar, QToolBar, QSplashScreen, QProgressDialog, QStyle, QStatusBar,
     QPlainTextEdit, QProgressBar, QDockWidget, QPushButton, QLineEdit, QCheckBox, QSizePolicy,
-    QDialog, QFormLayout, QComboBox, QDialogButtonBox
+    QDialog, QFormLayout, QComboBox, QDialogButtonBox, QTabWidget, QRadioButton
 )
+
 from PyQt6.QtGui import QAction, QIcon, QPixmap, QGuiApplication, QTextCursor
 from PyQt6.QtCore import Qt, QTimer, QRunnable, QThreadPool, QDateTime, QProcess, QFile, QTextStream, QCoreApplication
 
@@ -45,7 +46,6 @@ def _ensure_project_dirs(base_dir: str) -> dict[str, str]:
         os.makedirs(p, exist_ok=True)
     return paths
 
-
 def _asset_path(*parts: str) -> str:
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     candidates = [
@@ -57,6 +57,21 @@ def _asset_path(*parts: str) -> str:
         if os.path.exists(p):
             return p
     return candidates[0]
+
+def themed_icon(name: str, theme: str) -> QIcon:
+    """
+    Loads icons from resources/icons.
+    Expect files like:
+      save_light.png, save_dark.png, refresh_light.png, refresh_dark.png
+    """
+    suffix = "light" if (theme or "").lower() == "dark" else "dark"
+    # NOTE: suffix is inverted because dark theme needs LIGHT icons.
+    # If you name them differently, swap logic.
+    path = _asset_path("icons", f"{name}_{suffix}.png")
+    if os.path.exists(path):
+        return QIcon(path)
+    return QIcon()  # fallback
+
 
 
 # ---------- Splash warmup ----------
@@ -117,6 +132,92 @@ def load_stylesheet(file_path):
         stream = QTextStream(file)
         return stream.readAll()
     return ""
+
+# ---------- Theme / Display settings ----------
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+
+ACCENT_BLUE = "blue"
+ACCENT_GREEN = "green"
+ACCENT_ORANGE = "orange"
+ACCENT_PURPLE = "purple"
+
+def load_ui_prefs() -> dict:
+    s = QSettings("BuoyTools", "DBViewer")
+    return {
+        "theme": str(s.value("ui/theme", THEME_LIGHT)),
+        "accent": str(s.value("ui/accent", ACCENT_BLUE)),
+    }
+
+def save_ui_prefs(theme: str, accent: str) -> None:
+    s = QSettings("BuoyTools", "DBViewer")
+    s.setValue("ui/theme", theme)
+    s.setValue("ui/accent", accent)
+
+
+def apply_ui_theme(app: QApplication, theme: str, accent: str = "") -> tuple[str, str]:
+    """
+    Load a real QSS file from resources/styles.
+    Accent is currently unused (kept for backward compatibility).
+    """
+    theme = (theme or THEME_LIGHT).strip().lower()
+    qss_file = "dark.qss" if theme == THEME_DARK else "light.qss"
+
+    qss_path = _asset_path("styles", qss_file)
+    qss = load_stylesheet(qss_path)
+
+    if not qss:
+        # Fail-safe: don't crash if file missing
+        qss = ""
+
+    app.setStyleSheet(qss)
+    return theme, (accent or "")
+
+
+
+class DisplaySettingsDialog(QDialog):
+    def __init__(self, current_theme: str, current_accent: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Display Settings")
+        self.resize(440, 260)
+
+        v = QVBoxLayout(self)
+        tabs = QTabWidget(self)
+        v.addWidget(tabs)
+
+        tab = QWidget(self)
+        tabs.addTab(tab, "Display")
+        form = QFormLayout(tab)
+
+        self.cmb_theme = QComboBox(self)
+        self.cmb_theme.addItems([THEME_LIGHT, THEME_DARK])
+        idx = self.cmb_theme.findText((current_theme or THEME_LIGHT).lower())
+        if idx >= 0:
+            self.cmb_theme.setCurrentIndex(idx)
+
+        self.cmb_accent = QComboBox(self)
+        self.cmb_accent.addItems([ACCENT_BLUE, ACCENT_GREEN, ACCENT_ORANGE, ACCENT_PURPLE])
+        idx2 = self.cmb_accent.findText((current_accent or ACCENT_BLUE).lower())
+        if idx2 >= 0:
+            self.cmb_accent.setCurrentIndex(idx2)
+
+        form.addRow("Theme:", self.cmb_theme)
+        form.addRow("Accent:", self.cmb_accent)
+
+        hint = QLabel("Applies instantly and is remembered for next launch.", self)
+        hint.setStyleSheet("color:#666; font-weight: 400;")
+        v.addWidget(hint)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        v.addWidget(btns)
+
+    def chosen(self) -> tuple[str, str]:
+        return self.cmb_theme.currentText(), self.cmb_accent.currentText()
 
 
 # ---------- Activity bar (dockable log) ----------
@@ -455,6 +556,27 @@ class MainWindow(QMainWindow):
         h._is_temp_handler = True
         logger.addHandler(h)
         self._temp_handler = h
+
+    def _refresh_toolbar_icons(self, theme: str):
+        if not hasattr(self, "_tb_actions"):
+            return
+
+        mapping = {
+            "new": QStyle.StandardPixmap.SP_FileIcon,
+            "open": QStyle.StandardPixmap.SP_DialogOpenButton,
+            "save": QStyle.StandardPixmap.SP_DialogSaveButton,
+            "save_as": QStyle.StandardPixmap.SP_DialogSaveButton,
+            "refresh_tabs": QStyle.StandardPixmap.SP_BrowserReload,
+            "logging_toggle":
+                QStyle.StandardPixmap.SP_DialogApplyButton
+                if self._logging_enabled
+                else QStyle.StandardPixmap.SP_DialogCancelButton,
+        }
+
+        for key, sp in mapping.items():
+            act = self._tb_actions.get(key)
+            if act:
+                act.setIcon(self.style().standardIcon(sp))
 
     def _attach_project_logging(self, project_dir: str):
         try:
@@ -818,23 +940,52 @@ class MainWindow(QMainWindow):
         self.act_logging.toggled.connect(self._set_logging_enabled)
         self._update_logging_action_ui()
 
-        # Toolbar actions map (buttons that appear on the toolbar)
-        icon_new = QIcon.fromTheme("document-new", self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
-        icon_open = QIcon.fromTheme("document-open",
-                                    self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
-        icon_save = QIcon.fromTheme("document-save",
-                                    self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        icon_save_as = QIcon.fromTheme("document-save-as",
-                                       self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        icon_refresh = QIcon.fromTheme("view-refresh",
-                                       self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._tb_actions: Dict[str, QAction] = {}
+
+        def _make_tb_action(key: str, text: str, slot, icon: QIcon) -> QAction:
+            act = QAction(icon, text, self)
+            act.triggered.connect(slot)
+            self._tb_actions[key] = act
+            return act
+
+        prefs = load_ui_prefs()
+        theme_now = prefs["theme"]
+
+        act_tb_new = _make_tb_action(
+            "new", "New", self.new_project,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        )
+
+        act_tb_open = _make_tb_action(
+            "open", "Open", self.open_project,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)
+        )
+
+        act_tb_save = _make_tb_action(
+            "save", "Save", self.save_project,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        )
+
+        act_tb_save_as = _make_tb_action(
+            "save_as", "Save As", self.save_project_as,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        )
+
+        act_tb_refresh = _make_tb_action(
+            "refresh_tabs", "Refresh Tabs", self.refresh_tabs_only,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+
+        # keep your existing logging toggle QAction
+        # (but we'll also set its icon dynamically below)
+        self._tb_actions["logging_toggle"] = self.act_logging
 
         self.action_toolbar_map = {
-            "new": (icon_new, "New", self.new_project),
-            "open": (icon_open, "Open", self.open_project),
-            "save": (icon_save, "Save", self.save_project),
-            "save_as": (icon_save_as, "Save As", self.save_project_as),
-            "refresh_tabs": (icon_refresh, "Refresh Tabs", self.refresh_tabs_only),
+            "new": act_tb_new,
+            "open": act_tb_open,
+            "save": act_tb_save,
+            "save_as": act_tb_save_as,
+            "refresh_tabs": act_tb_refresh,
             "logging_toggle": self.act_logging,
         }
 
@@ -844,6 +995,22 @@ class MainWindow(QMainWindow):
         # ----- View menu -----
         m_view = mb.addMenu("&View")
         m_view.addAction(self.act_logging)
+
+        m_view.addSeparator()
+
+        # Quick dark toggle + full display settings
+        prefs = load_ui_prefs()
+        self.act_dark_mode = QAction("Dark mode", self, checkable=True)
+        self.act_dark_mode.setChecked(prefs["theme"] == THEME_DARK)
+        self.act_dark_mode.toggled.connect(
+            lambda on: self._set_ui_theme(THEME_DARK if on else THEME_LIGHT, load_ui_prefs()["accent"])
+        )
+        m_view.addAction(self.act_dark_mode)
+
+        act_display_settings = QAction("Display Settings…", self)
+        act_display_settings.triggered.connect(self._open_display_settings)
+        m_view.addAction(act_display_settings)
+
 
         m_view.addSeparator()
         act_tb_mgr = QAction("Toolbar Manager…", self)
@@ -886,6 +1053,9 @@ class MainWindow(QMainWindow):
             self.act_logging.setText("Logging: OFF")
             self.act_logging.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton))
             self.act_logging.setToolTip("Turn logging ON")
+
+        # ✅ keep toolbar icon in sync too
+        self._refresh_toolbar_icons(load_ui_prefs()["theme"])
 
     def _open_db_viewer(self):
         if not self.db_path:
@@ -1450,27 +1620,64 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Dashboard", "Failed to start Streamlit.")
 
     # -------------- Helpers --------------
+    def _set_ui_theme(self, theme: str, accent: str):
+        app = QApplication.instance()
+        theme, _ = apply_ui_theme(app, theme, accent)
+
+        # Persist only theme (leave accent stored if you want; it's not applied)
+        prefs = load_ui_prefs()
+        save_ui_prefs(theme, prefs.get("accent", ACCENT_BLUE))
+
+        if hasattr(self, "act_dark_mode") and self.act_dark_mode:
+            self.act_dark_mode.blockSignals(True)
+            self.act_dark_mode.setChecked(theme == THEME_DARK)
+            self.act_dark_mode.blockSignals(False)
+
+        self._refresh_toolbar_icons(theme)
+        try:
+            self.activity.log(f"Theme applied via QSS file: {theme}")
+        except Exception:
+            pass
+
+    def _open_display_settings(self):
+        prefs = load_ui_prefs()
+        dlg = DisplaySettingsDialog(prefs["theme"], prefs["accent"], self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            theme, accent = dlg.chosen()
+            self._set_ui_theme(theme, accent)
+
     def _open_user_settings(self):
         """Open the guardrail/user settings dialog and apply/save changes."""
         try:
             dlg = SettingsDialog(self.guard, self)
             if dlg.exec() == dlg.DialogCode.Accepted:
                 self.guard = dlg.result()
+
                 # ensure defaults exist
                 self.guard.auto_restart_on_crash = bool(getattr(self.guard, "auto_restart_on_crash", False))
-                self.guard.auto_restart_on_exit  = bool(getattr(self.guard, "auto_restart_on_exit",  False))
-                self.guard.restart_outlook_on_outlook_errors = bool(getattr(self.guard, "restart_outlook_on_outlook_errors", True))
-                self.guard.restart_app_on_outlook_errors     = bool(getattr(self.guard, "restart_app_on_outlook_errors", True))
+                self.guard.auto_restart_on_exit = bool(getattr(self.guard, "auto_restart_on_exit", False))
+                self.guard.restart_outlook_on_outlook_errors = bool(
+                    getattr(self.guard, "restart_outlook_on_outlook_errors", True))
+                self.guard.restart_app_on_outlook_errors = bool(
+                    getattr(self.guard, "restart_app_on_outlook_errors", True))
+
                 self.guard.save()
+
                 # push to manager
                 self.parser_mgr.set_auto_restart_outlook(self.guard.restart_outlook_on_outlook_errors)
                 self.parser_mgr.set_restart_app_on_outlook_fail(self.guard.restart_app_on_outlook_errors)
+
+                # ✅ APPLY DISPLAY PREFS (theme/accent) immediately
+                prefs = load_ui_prefs()
+                self._set_ui_theme(prefs["theme"], prefs["accent"])
+
                 self.activity.log(
                     "Settings saved: "
                     f"restart-on-exit={'ON' if self.guard.auto_restart_on_exit else 'OFF'}, "
                     f"restart-on-crash={'ON' if self.guard.auto_restart_on_crash else 'OFF'}, "
                     f"outlook-restart={'ON' if self.guard.restart_outlook_on_outlook_errors else 'OFF'}, "
-                    f"restart-on-persistent-outlook={'ON' if self.guard.restart_app_on_outlook_errors else 'OFF'}"
+                    f"restart-on-persistent-outlook={'ON' if self.guard.restart_app_on_outlook_errors else 'OFF'}, "
+                    f"theme={prefs['theme']}, accent={prefs['accent']}"
                 )
         except Exception as e:
             QMessageBox.warning(self, "Settings", f"Failed to open/apply settings:\n{e}")
@@ -1682,14 +1889,14 @@ def main():
     splash.show()
     app.processEvents()
 
+    # Apply saved theme before the UI paints
+    prefs = load_ui_prefs()
+    apply_ui_theme(app, prefs["theme"], prefs["accent"])
+
     window = MainWindow()
     if not app_icon.isNull():
         window.setWindowIcon(app_icon)
     window.show()
-
-    # Load stylesheet if present
-    qss = load_stylesheet(_asset_path("style.qss"))
-    QTimer.singleShot(0, lambda: app.setStyleSheet(qss))
 
     QTimer.singleShot(0, lambda: QThreadPool.globalInstance().start(_WarmupTask()))
     splash.finish(window)

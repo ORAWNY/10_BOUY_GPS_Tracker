@@ -1,0 +1,95 @@
+/* ===== Light Theme ===== */
+QWidget {
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+    color: #1f2937;
+    background: #f3f4f6;
+}
+
+QToolBar {
+    background: #ffffff;
+    border: 0px;
+    spacing: 6px;
+    padding: 6px;
+}
+
+QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+QToolButton:hover {
+    border: 1px solid #e5e7eb;
+    background: #f3f4f6;
+}
+
+QPushButton {
+    background: #0ea5e9;
+    color: #ffffff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+QPushButton:hover { background: #0284c7; }
+QPushButton:pressed { background: #0369a1; }
+
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
+QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus {
+    border: 1px solid #0ea5e9;
+}
+
+/* Tables */
+QTableView, QTableWidget {
+    background: #ffffff;
+    alternate-background-color: #f8fafc;
+    color: #111827;
+    gridline-color: #e5e7eb;
+    border: 1px solid #e5e7eb;
+}
+
+/* IMPORTANT: do NOT force item text color here.
+   If you set QTableWidget::item { color: ... }, it will fight your timer cell styling. */
+
+QHeaderView::section {
+    background: #f8fafc;
+    color: #111827;
+    border: 1px solid #e5e7eb;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+
+QTabWidget::pane {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 8px;
+    background: #ffffff;
+}
+QTabBar::tab {
+    background: #f3f4f6;
+    color: #111827;
+    padding: 8px 14px;
+    border: 1px solid #e5e7eb;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 4px;
+}
+QTabBar::tab:selected {
+    background: #ffffff;
+}
+
+QToolTip {
+    color: #ffffff;
+    background: #111827;
+    border: 0px;
+    padding: 6px 8px;
+    border-radius: 6px;
+}

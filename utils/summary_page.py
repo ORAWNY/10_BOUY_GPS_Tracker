@@ -1,21 +1,34 @@
 # utils/summary_page.py
 from __future__ import annotations
 
-import os
 import sqlite3
-import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
+from PyQt6.QtCore import Qt, QTimer, QRect
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor, QAction
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
-    QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
-    QToolButton, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
-    QSpinBox, QFormLayout, QMenu
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QMessageBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QAbstractItemView,
+    QHeaderView,
+    QDialog,
+    QDialogButtonBox,
+    QListWidget,
+    QListWidgetItem,
+    QSpinBox,
+    QFormLayout,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
 )
 
 from utils.time_settings import local_zone, parse_series_to_local_naive
@@ -29,6 +42,7 @@ except Exception:
 
 
 # ------------------------- DB helpers -------------------------
+
 
 def _list_user_tables(db_path: str) -> list[str]:
     try:
@@ -82,26 +96,20 @@ def _fmt_td(td: Optional[pd.Timedelta]) -> str:
 
 
 def _status_to_level(st: Any) -> str:
-    """
-    Map Status enum (or string) to 'green/amber/red/unknown'.
-    """
+    """Map Status enum (or string) to 'green/amber/red/off/unknown'."""
     if st is None:
         return "unknown"
     if hasattr(st, "value"):
         st = st.value
     s = str(st).strip().upper()
-    if s == "GREEN":
-        return "green"
-    if s == "AMBER":
-        return "amber"
-    if s == "RED":
-        return "red"
+    if s in {"GREEN", "AMBER", "RED"}:
+        return s.lower()
     if s == "OFF":
         return "off"
     return "unknown"
 
 
-def _status_brush(level: str) -> QBrush:
+def _status_color(level: str) -> QColor:
     lvl = (level or "").strip().lower()
     css = {
         "green": "#2f9e44",
@@ -110,30 +118,60 @@ def _status_brush(level: str) -> QBrush:
         "unknown": "#868e96",
         "off": "#868e96",
     }.get(lvl, "#868e96")
-    return QBrush(QColor(css))
+    return QColor(css)
 
 
 # ------------------------- Columns -------------------------
 
-DEFAULT_COLS = [
-    "Project",
-    "Count",
-    "Last time",
-    "Since last",
-    "Std gap",
-]
+DEFAULT_COLS = ["Project", "Count", "Last time", "Since last", "Std gap"]
+ALL_AVAILABLE_COLS = list(DEFAULT_COLS)
 
-ALL_AVAILABLE_COLS = [
-    "Project",
-    "Count",
-    "Last time",
-    "Since last",
-    "Std gap",
-    "Last value",
-]
+# Custom data role for the stale level stored on the "Since last" items
+ROLE_SINCE_LEVEL = int(Qt.ItemDataRole.UserRole) + 1
+
+
+# ------------------------- Delegate (the important bit) -------------------------
+
+class SinceLastDelegate(QStyledItemDelegate):
+    """
+    Paint the "Since last" column ourselves so QSS / alternating rows cannot override it.
+    Forces consistent text colour (white) ONLY for this column.
+    """
+    def paint(self, painter: QPainter, option, index):
+        # Read level from our custom role
+        level = index.data(ROLE_SINCE_LEVEL)
+        level = str(level or "unknown").lower()
+        bg = _status_color(level)
+
+        # Text we want to show
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+
+        painter.save()
+
+        # 1) Fill background ourselves (this bypasses QSS + alternatingRowColors)
+        painter.fillRect(option.rect, bg)
+
+        # 2) Draw text ourselves (this bypasses QSS text colour)
+        painter.setPen(QPen(QColor("#ffffff")))
+
+        # Left aligned, vertically centered, with padding
+        pad = 8
+        r = QRect(option.rect)
+        r.adjust(pad, 0, -pad, 0)
+
+        fm = painter.fontMetrics()
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, r.width())
+        painter.drawText(r, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), elided)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return super().sizeHint(option, index)
+
 
 
 # ------------------------- Config -------------------------
+
 
 def _default_stale_payload() -> Dict[str, Any]:
     """
@@ -142,15 +180,15 @@ def _default_stale_payload() -> Dict[str, Any]:
     return {
         "amber_min": 30,
         "red_min": 60,
-        "scope_all": False,            # False → since last; True → max historical gap
+        "scope_all": False,  # False → since last; True → max historical gap
         "interval_min": 15,
         "email_cooldown_min": 240,
-        "email_on_amber": False,       # NEW
+        "email_on_amber": False,
         "email_on_escalation": True,
         "email_on_recovery": False,
         "recipients": [],
-        "threshold_min": 30,           # legacy
-        "also_tables": [],             # optional multi-table monitoring
+        "threshold_min": 30,  # legacy
+        "also_tables": [],  # optional multi-table monitoring
     }
 
 
@@ -159,7 +197,6 @@ class SummaryState:
     selected_tables: List[str]
     columns: List[str]
     sample_limit: int
-    last_value_column: str
     stale_cfg_by_table: Dict[str, Dict[str, Any]]
 
     def to_json(self) -> Dict[str, Any]:
@@ -167,7 +204,6 @@ class SummaryState:
             "selected_tables": list(self.selected_tables),
             "columns": list(self.columns),
             "sample_limit": int(self.sample_limit),
-            "last_value_column": str(self.last_value_column or ""),
             "stale_cfg_by_table": dict(self.stale_cfg_by_table or {}),
         }
 
@@ -186,8 +222,6 @@ class SummaryState:
         sample = int(d.get("sample_limit") or 20000)
         sample = max(2000, min(sample, 200000))
 
-        lvc = str(d.get("last_value_column") or "")
-
         raw_cfg = d.get("stale_cfg_by_table") or {}
         cfg: Dict[str, Dict[str, Any]] = {}
         if isinstance(raw_cfg, dict):
@@ -199,11 +233,9 @@ class SummaryState:
             selected_tables=sel,
             columns=cols,
             sample_limit=sample,
-            last_value_column=lvc,
             stale_cfg_by_table=cfg,
         )
 
-    # ---- helpers ----
     def stale_cfg_for(self, table: str) -> Dict[str, Any]:
         base = _default_stale_payload()
         user = dict(self.stale_cfg_by_table.get(table, {}) or {})
@@ -213,20 +245,25 @@ class SummaryState:
         return base
 
     def set_stale_cfg(self, table: str, payload: Dict[str, Any]) -> None:
-        if not isinstance(payload, dict):
-            return
-        self.stale_cfg_by_table[table] = dict(payload)
+        if isinstance(payload, dict):
+            self.stale_cfg_by_table[table] = dict(payload)
 
 
 # ------------------------- Dialogs -------------------------
 
+
 class _PickListDialog(QDialog):
-    """
-    Simple checklist dialog.
-    Optionally supports re-order via move up/down.
-    """
-    def __init__(self, title: str, items: List[str], checked: List[str], parent=None, *,
-                 allow_reorder: bool = False):
+    """Simple checklist dialog. Optionally supports re-order via move up/down."""
+
+    def __init__(
+        self,
+        title: str,
+        items: List[str],
+        checked: List[str],
+        parent=None,
+        *,
+        allow_reorder: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -256,7 +293,9 @@ class _PickListDialog(QDialog):
         self.btn_up.clicked.connect(self._move_up)
         self.btn_dn.clicked.connect(self._move_down)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         v.addWidget(btns)
@@ -278,7 +317,7 @@ class _PickListDialog(QDialog):
         self.list.setCurrentRow(r + 1)
 
     def result_checked_in_order(self) -> List[str]:
-        out = []
+        out: List[str] = []
         for i in range(self.list.count()):
             li = self.list.item(i)
             if li.checkState() == Qt.CheckState.Checked:
@@ -302,7 +341,9 @@ class _SettingsDialog(QDialog):
         form.addRow("Gap stats sample size (rows):", self.spin_sample)
         v.addLayout(form)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         v.addWidget(btns)
@@ -313,11 +354,10 @@ class _SettingsDialog(QDialog):
 
 # ------------------------- Minimal Host (for stale viewer/editor) -------------------------
 
+
 class _LiteHost:
-    """
-    Minimal Host-like object for alert viewers/editors:
-      - db_path, table_name, df, datetime_col
-    """
+    """Minimal Host-like object for alert viewers/editors: db_path, table_name, df, datetime_col."""
+
     def __init__(self, db_path: str, table: str, df: pd.DataFrame, dt_col: str):
         self.db_path = db_path
         self.table_name = table
@@ -327,15 +367,15 @@ class _LiteHost:
 
 # ------------------------- Main Page -------------------------
 
+
 class SummaryPage(QWidget):
     """
     Summary dashboard as a single table.
 
-    IMPORTANT PERFORMANCE RULE:
-    - We DO NOT constantly re-read SQLite in the background.
-    - DB reads happen only when the user clicks Refresh (or opens the “Since last” dialog).
-
-    We still update the "Since last" timer display every second using cached last_dt (no DB I/O).
+    Performance model:
+    - Full refresh (expensive): refresh_from_db() -> recompute everything.
+    - Light refresh (cheap): refresh_light_from_db() -> updates count + last timestamp only.
+    - Tick: updates Since last visually every second using cached last_dt (no DB I/O).
     """
 
     def __init__(self, db_path: str, alerts_provider: Optional[Any] = None, parent=None):
@@ -348,28 +388,23 @@ class SummaryPage(QWidget):
             selected_tables=list(self._db_tables),
             columns=list(DEFAULT_COLS),
             sample_limit=20000,
-            last_value_column="",
             stale_cfg_by_table={},
         )
 
-        # Cache for “pay once” behaviour
-        # table -> dict(count, last_dt, last_time_str, std_gap_str, std_gap_tip, level, tip, dt_col)
+        # table -> dict(count, last_dt, last_time_str, std_gap_str, std_gap_tip, since_last_level, since_last_tip, dt_col)
         self._stats_cache: Dict[str, Dict[str, Any]] = {}
-
-        # Hosts are created only when needed (viewer/edit), not for ticking
         self._host_by_table: Dict[str, _LiteHost] = {}
-
         self._building = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # Header controls
+        # Header
         top = QHBoxLayout()
-        self.badge_lbl = QLabel("Status summary")
+        self.badge_lbl = QLabel("—")
         self.badge_lbl.setStyleSheet(
-            "padding:4px 8px; border-radius:10px; background:#343a40; color:white; font-weight:bold;"
+            "padding:4px 10px; border-radius:10px; background:#343a40; color:white; font-weight:bold;"
         )
         top.addWidget(self.badge_lbl)
 
@@ -390,17 +425,6 @@ class SummaryPage(QWidget):
         top.addWidget(self.btn_settings)
 
         top.addStretch(1)
-
-        self.btn_more = QToolButton(self)
-        self.btn_more.setText("⋯")
-        self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        m = QMenu(self.btn_more)
-        act_last_value = QAction("Set “Last value” column…", self)
-        act_last_value.triggered.connect(self._pick_last_value_column)
-        m.addAction(act_last_value)
-        self.btn_more.setMenu(m)
-        top.addWidget(self.btn_more)
-
         root.addLayout(top)
 
         # Table
@@ -423,7 +447,6 @@ class SummaryPage(QWidget):
         self._tick.timeout.connect(self._tick_since_last_only)
         self._tick.start()
 
-        # Initial: load once
         self.refresh_from_db()
 
     # ---------------- persistence hooks ----------------
@@ -436,7 +459,7 @@ class SummaryPage(QWidget):
         self._state = SummaryState.from_json(data or {}, db_tables=self._db_tables)
         self.refresh_from_db()
 
-    # ---------------- Settings / pickers ----------------
+    # ---------------- pickers / settings ----------------
 
     def _pick_projects(self):
         self._db_tables = _list_user_tables(self.db_path)
@@ -469,35 +492,6 @@ class SummaryPage(QWidget):
         dlg = _SettingsDialog(self._state, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._state.sample_limit = dlg.result_sample_limit()
-            # settings affects std gap sampling; require a DB refresh to recompute
-            self.refresh_from_db()
-
-    def _pick_last_value_column(self):
-        cols = set()
-        try:
-            with sqlite3.connect(self.db_path, timeout=10) as conn:
-                for t in self._state.selected_tables:
-                    for c in _table_columns(conn, t):
-                        cols.add(c)
-        except Exception:
-            cols = set()
-
-        cols = sorted(cols)
-        if not cols:
-            QMessageBox.information(self, "Last value", "No columns found in selected tables.")
-            return
-
-        dlg = _PickListDialog(
-            "Pick the column to show as “Last value”",
-            items=cols,
-            checked=[self._state.last_value_column] if self._state.last_value_column else [],
-            parent=self,
-            allow_reorder=False,
-        )
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            picked = dlg.result_checked_in_order()
-            self._state.last_value_column = picked[0] if picked else ""
-            # requires DB load to populate values
             self.refresh_from_db()
 
     # ---------------- click handling ----------------
@@ -531,7 +525,11 @@ class SummaryPage(QWidget):
 
         handler = REGISTRY.get("Stale")
         if not handler:
-            QMessageBox.information(self, "Since last", "Stale handler not registered. Import utils.alerts.stale_alert.")
+            QMessageBox.information(
+                self,
+                "Since last",
+                "Stale handler not registered. Import utils.alerts.stale_alert.",
+            )
             return
 
         try:
@@ -548,7 +546,7 @@ class SummaryPage(QWidget):
         except Exception:
             pass
 
-        # We don't auto-refresh DB; but after editing thresholds you want colours to match
+        # Thresholds changed → recompute status colours (no DB refresh)
         self._recompute_status_for_table_from_cache(table)
         self._render_from_cache()
 
@@ -586,10 +584,7 @@ class SummaryPage(QWidget):
     # ---------------- refresh (DB vs cache) ----------------
 
     def refresh_from_db(self):
-        """
-        Full refresh FROM SQLite (expensive).
-        Only called when the user clicks Refresh / changes settings requiring DB work.
-        """
+        """Full refresh FROM SQLite (expensive). Only runs on user action."""
         if self._building:
             return
         self._building = True
@@ -602,10 +597,9 @@ class SummaryPage(QWidget):
     def refresh_light_from_db(self):
         """
         Light refresh FROM SQLite (cheap):
-          - updates count + last_dt (+ last_value if configured)
+          - updates count + last_dt
           - DOES NOT recompute std-gap sampling (expensive)
-          - recomputes stale level/tooltips using the handler (fast slice) per touched table
-        Intended for auto-refresh after parsers run.
+          - recomputes stale level/tooltips using the handler (fast eval slice) per touched table
         """
         if self._building:
             return
@@ -616,7 +610,6 @@ class SummaryPage(QWidget):
             if not tables:
                 tables = list(sorted(tables_live))
 
-            # keep old cache values for std_gap_* etc
             new_cache: Dict[str, Dict[str, Any]] = dict(self._stats_cache or {})
 
             with sqlite3.connect(self.db_path, timeout=10) as conn:
@@ -626,7 +619,6 @@ class SummaryPage(QWidget):
                         new_cache[table] = {"table": table, "count": 0, "last_dt": None, "dt_col": None}
                         continue
 
-                    # cheap stats: COUNT + MAX(dt)
                     try:
                         df_basic = pd.read_sql_query(
                             f'SELECT COUNT(1) AS n, MAX("{dt_col}") AS mx FROM "{table}"',
@@ -649,23 +641,6 @@ class SummaryPage(QWidget):
                         except Exception:
                             last_dt = None
 
-                    # last value (optional) - still cheap (1 row)
-                    last_value_str = new_cache.get(table, {}).get("last_value_str", "—")
-                    lvc = (self._state.last_value_column or "").strip()
-                    if lvc:
-                        cols = set(_table_columns(conn, table))
-                        if lvc in cols and count > 0:
-                            try:
-                                df_lv = pd.read_sql_query(
-                                    f'SELECT "{lvc}" AS v FROM "{table}" ORDER BY "{dt_col}" DESC LIMIT 1',
-                                    conn,
-                                )
-                                if not df_lv.empty:
-                                    v = df_lv.loc[0, "v"]
-                                    last_value_str = "—" if pd.isna(v) else str(v)
-                            except Exception:
-                                pass
-
                     prev = new_cache.get(table, {})
                     new_cache[table] = {
                         "table": table,
@@ -673,18 +648,14 @@ class SummaryPage(QWidget):
                         "count": count,
                         "last_dt": last_dt,
                         "last_time_str": _fmt_dt(last_dt),
-                        # preserve expensive values
                         "std_gap_str": prev.get("std_gap_str", "—"),
                         "std_gap_tip": prev.get("std_gap_tip", ""),
-                        "last_value_str": last_value_str,
-                        # preserve any status fields; we’ll recompute next
                         "since_last_level": prev.get("since_last_level", "unknown"),
                         "since_last_tip": prev.get("since_last_tip", ""),
                     }
 
             self._stats_cache = new_cache
 
-            # Recompute the stale level/tooltips for tables we touched (fast eval path)
             for table in tables:
                 self._recompute_status_for_table_from_cache(table)
 
@@ -693,9 +664,7 @@ class SummaryPage(QWidget):
             self._building = False
 
     def refresh(self):
-        """
-        Compatibility method: treat as cache render (no DB).
-        """
+        """Compatibility method: re-render cached values (no DB)."""
         self._render_from_cache()
 
     def _load_cache_from_db(self):
@@ -737,7 +706,7 @@ class SummaryPage(QWidget):
                         except Exception:
                             last_dt = None
 
-                    # "Std gap" column: report the MOST COMMON (typical) gap between regular messages
+                    # "Std gap": typical cadence estimate (mode of binned deltas)
                     std_gap_str = "—"
                     std_gap_tip = ""
                     if count >= 2:
@@ -755,59 +724,31 @@ class SummaryPage(QWidget):
                             ts = parse_series_to_local_naive(df_ts["t"]).dropna()
                             if ts.shape[0] >= 2:
                                 ts = ts.sort_values(kind="stable")
-
-                                # deltas in seconds
                                 deltas = ts.diff().dropna()
                                 if not deltas.empty:
                                     sec = deltas.dt.total_seconds().astype(float)
-                                    sec = sec[sec > 0]  # remove zeros/negatives
-
+                                    sec = sec[sec > 0]
                                     if not sec.empty:
-                                        # 1) round to nearest bucket to stabilize the "mode"
-                                        #    (adjust bucket_s if your cadence is coarse/fine)
                                         bucket_s = 60.0  # 1-minute buckets
                                         binned = (sec / bucket_s).round() * bucket_s
 
-                                        # 2) drop "outage gaps" using a robust cutoff (IQR rule)
                                         q1 = binned.quantile(0.25)
                                         q3 = binned.quantile(0.75)
                                         iqr = max(1.0, float(q3 - q1))
-                                        cutoff = float(q3 + 3.0 * iqr)  # stronger than 1.5*IQR to keep some variability
+                                        cutoff = float(q3 + 3.0 * iqr)
                                         regular = binned[binned <= cutoff]
-
-                                        # fallback if everything got filtered out
                                         if regular.empty:
                                             regular = binned
 
-                                        # 3) mode = most common gap bucket
                                         vc = regular.value_counts()
                                         typical_s = float(vc.index[0])
                                         std_gap_str = _fmt_td(pd.Timedelta(seconds=typical_s))
-
-                                        # a useful tooltip
                                         std_gap_tip = (
                                             f"Typical gap (mode) using {bucket_s:.0f}s bins; "
                                             f"n={int(regular.shape[0])} gaps; cutoff={int(cutoff)}s."
                                         )
 
-                    # last value (optional)
-                    last_value_str = "—"
-                    lvc = (self._state.last_value_column or "").strip()
-                    if lvc:
-                        cols = set(_table_columns(conn, table))
-                        if lvc in cols and count > 0:
-                            try:
-                                df_lv = pd.read_sql_query(
-                                    f'SELECT "{lvc}" AS v FROM "{table}" ORDER BY "{dt_col}" DESC LIMIT 1',
-                                    conn,
-                                )
-                                if not df_lv.empty:
-                                    v = df_lv.loc[0, "v"]
-                                    last_value_str = "—" if pd.isna(v) else str(v)
-                            except Exception:
-                                pass
-
-                    row = {
+                    new_cache[table] = {
                         "table": table,
                         "dt_col": dt_col,
                         "count": count,
@@ -815,25 +756,17 @@ class SummaryPage(QWidget):
                         "last_time_str": _fmt_dt(last_dt),
                         "std_gap_str": std_gap_str,
                         "std_gap_tip": std_gap_tip,
-                        "last_value_str": last_value_str,
                     }
-                    new_cache[table] = row
 
         except Exception:
-            # if DB fails, keep old cache
             return
 
         self._stats_cache = new_cache
 
-        # Compute initial status levels + tooltips using handler (once per refresh)
         for table in list(self._stats_cache.keys()):
             self._recompute_status_for_table_from_cache(table)
 
     def _recompute_status_for_table_from_cache(self, table: str):
-        """
-        Use the real Stale handler evaluation ONCE (no background loop).
-        We store the resulting level + tooltip; tick updates the timer display only.
-        """
         row = self._stats_cache.get(table)
         if not row:
             return
@@ -854,7 +787,6 @@ class SummaryPage(QWidget):
             row["since_last_tip"] = "Stale handler not registered."
             return
 
-        # Fast-ish host: only load a small slice for evaluation
         host = self._build_host_for_stale(table, for_viewer=False)
         if host is None:
             row["since_last_level"] = "unknown"
@@ -863,11 +795,9 @@ class SummaryPage(QWidget):
 
         try:
             res = handler.evaluate(spec, host)
-            st = res.get("status")
-            row["since_last_level"] = _status_to_level(st)
+            row["since_last_level"] = _status_to_level(res.get("status"))
             row["since_last_tip"] = str(res.get("summary") or "") or "Click to view chart and edit thresholds."
         except Exception:
-            # fallback based on cached last_dt only
             row["since_last_level"] = self._fallback_level_from_last_dt(table)
             row["since_last_tip"] = "Click to view chart and edit thresholds."
 
@@ -876,6 +806,7 @@ class SummaryPage(QWidget):
         last_dt = row.get("last_dt", None)
         if last_dt is None:
             return "unknown"
+
         now_local = pd.Timestamp.now(tz=local_zone()).tz_localize(None)
         since_s = float((now_local - last_dt).total_seconds())
 
@@ -891,11 +822,50 @@ class SummaryPage(QWidget):
             return "amber"
         return "green"
 
+    def _update_badge(self, tables: List[str]) -> None:
+        g = a = r = u = 0
+        for t in tables:
+            row = self._stats_cache.get(t, {})
+            last_dt = row.get("last_dt")
+            lvl = self._fallback_level_from_last_dt(t) if last_dt is not None else row.get("since_last_level", "unknown")
+            lvl = str(lvl or "unknown").lower()
+            if lvl == "green":
+                g += 1
+            elif lvl == "amber":
+                a += 1
+            elif lvl == "red":
+                r += 1
+            else:
+                u += 1
+
+        parts = []
+        if r:
+            parts.append(f"🔴 {r}")
+        if a:
+            parts.append(f"🟠 {a}")
+        if g:
+            parts.append(f"🟢 {g}")
+        if u:
+            parts.append(f"⚪ {u}")
+        self.badge_lbl.setText(f"Status: {'  '.join(parts) if parts else '—'}")
+
+    def _apply_since_delegate(self, cols: List[str]):
+        """
+        Important: set the delegate AFTER columns exist (and after re-render),
+        otherwise Qt may ignore it for new models/headers.
+        """
+        if "Since last" not in cols:
+            return
+        since_col = cols.index("Since last")
+        self.table.setItemDelegateForColumn(since_col, SinceLastDelegate(self.table))
+
     def _render_from_cache(self):
         tables_live = set(_list_user_tables(self.db_path))
         tables = [t for t in self._state.selected_tables if t in tables_live]
         if not tables:
             tables = list(sorted(tables_live))
+
+        self._update_badge(tables)
 
         cols = list(self._state.columns)
 
@@ -907,29 +877,26 @@ class SummaryPage(QWidget):
             "Project": "SQLite table name (one project per table).",
             "Count": "Total number of rows in the table.",
             "Last time": "Timestamp of the most recent datapoint (from last Refresh).",
-            "Since last": "Time since the most recent datapoint. Click for chart + thresholds + email settings.",
-            "Std gap": "Standard deviation of time gaps between datapoints (computed on Refresh).",
-            "Last value": "Last recorded value from the configured 'last value' column (computed on Refresh).",
+            "Since last": "Time since the most recent datapoint. Click to view chart and edit thresholds/email settings.",
+            "Std gap": "Typical cadence estimate from recent datapoints (computed on Refresh).",
         }
         for i, name in enumerate(cols):
             hi = QTableWidgetItem(name)
             hi.setToolTip(tips.get(name, name))
             self.table.setHorizontalHeaderItem(i, hi)
 
-        # Fill rows from cache
+        # ✅ Make sure the Since last delegate is active
+        self._apply_since_delegate(cols)
+
+        now_local = pd.Timestamp.now(tz=local_zone()).tz_localize(None)
+
         for r, table_name in enumerate(tables):
             row = self._stats_cache.get(table_name, {"table": table_name})
-
-            # compute since_last display dynamically from cached last_dt
             last_dt = row.get("last_dt", None)
-            now_local = pd.Timestamp.now(tz=local_zone()).tz_localize(None)
             since_td = (now_local - last_dt) if last_dt is not None else None
-
             since_last_str = _fmt_td(since_td)
-            since_last_level = row.get("since_last_level", "unknown")
-            # level is recomputed based on thresholds using cached last_dt, so colour keeps up as time passes
-            if last_dt is not None:
-                since_last_level = self._fallback_level_from_last_dt(table_name)
+
+            since_last_level = self._fallback_level_from_last_dt(table_name) if last_dt is not None else "unknown"
             since_last_tip = row.get("since_last_tip", "") or ""
 
             for c, colname in enumerate(cols):
@@ -945,9 +912,10 @@ class SummaryPage(QWidget):
                     self.table.setItem(r, c, QTableWidgetItem(row.get("last_time_str", "—")))
 
                 elif colname == "Since last":
+                    # ✅ Do NOT setForeground/setBackground here.
+                    # We store level as data; the delegate paints it reliably.
                     it = QTableWidgetItem(since_last_str)
-                    it.setForeground(QBrush(QColor("#ffffff")))
-                    it.setBackground(_status_brush(str(since_last_level)))
+                    it.setData(ROLE_SINCE_LEVEL, str(since_last_level))
                     it.setToolTip(since_last_tip)
                     self.table.setItem(r, c, it)
 
@@ -956,24 +924,24 @@ class SummaryPage(QWidget):
                     it.setToolTip(row.get("std_gap_tip", ""))
                     self.table.setItem(r, c, it)
 
-                elif colname == "Last value":
-                    self.table.setItem(r, c, QTableWidgetItem(row.get("last_value_str", "—")))
-
                 else:
                     self.table.setItem(r, c, QTableWidgetItem("—"))
 
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
 
+        # Force a repaint so the delegate kicks in immediately
+        self.table.viewport().update()
+
     def _tick_since_last_only(self):
-        """
-        Update only the Since last cell display + colour, without DB reads.
-        """
+        """Update only the Since last cell display + colour, without DB reads."""
         if self.table.rowCount() <= 0:
             return
+
         headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
         if "Since last" not in headers or "Project" not in headers:
             return
+
         col_since = headers.index("Since last")
         col_proj = headers.index("Project")
 
@@ -987,6 +955,7 @@ class SummaryPage(QWidget):
             row = self._stats_cache.get(table)
             if not row:
                 continue
+
             last_dt = row.get("last_dt", None)
             if last_dt is None:
                 continue
@@ -1001,8 +970,10 @@ class SummaryPage(QWidget):
                 self.table.setItem(r, col_since, it_since)
 
             it_since.setText(since_str)
-            it_since.setForeground(QBrush(QColor("#ffffff")))
-            it_since.setBackground(_status_brush(level))
+            it_since.setData(ROLE_SINCE_LEVEL, str(level))
+
+        # repaint only once at end
+        self.table.viewport().update()
 
     # ---------------- host builder for stale viewer/editor ----------------
 
@@ -1011,7 +982,7 @@ class SummaryPage(QWidget):
         Build a Host-like object for the Stale viewer/editor.
 
         - for_viewer=True loads up to sample_limit rows (chronological) for charting.
-        - for_viewer=False loads a much smaller slice (fast eval path).
+        - for_viewer=False loads a smaller slice (fast eval path).
         """
         try:
             with sqlite3.connect(self.db_path, timeout=10) as conn:

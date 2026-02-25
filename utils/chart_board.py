@@ -12,7 +12,7 @@ from PyQt6.QtGui import QAction, QDrag, QMouseEvent, QCursor, QGuiApplication, Q
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QToolButton, QMenu,
-    QSizePolicy, QFrame, QScrollArea, QSplitter
+    QSizePolicy, QFrame, QScrollArea, QSplitter, QToolBar
 )
 
 # Pull shared registry/types from your charts package
@@ -145,6 +145,9 @@ class ChartCardWidget(QWidget):
         else:
             self.renderer = handler.create_renderer(self.spec, self.get_df, self.columns, self, self.get_df_full)
 
+            # Fix Matplotlib toolbar icon visibility in dark UI (local to this card)
+            self._fix_embedded_toolbars_contrast()
+
             # NEW: enforce sizing so non-GIS charts always fit the cell
             self._apply_resizing_rules()
 
@@ -167,6 +170,47 @@ class ChartCardWidget(QWidget):
         act_new_above.triggered.connect(lambda: self.newRowRequested.emit(self, "above"))
         act_new_below.triggered.connect(lambda: self.newRowRequested.emit(self, "below"))
         act_rm.triggered.connect(lambda: self.removeRequested.emit(self))
+
+    def _fix_embedded_toolbars_contrast(self):
+        """
+        Matplotlib's NavigationToolbar2QT is a QToolBar with (usually) dark icons.
+        In dark mode those icons become hard to see because QSS won't recolor the PNGs.
+        So we force the toolbar to a light-ish background + clear hover states.
+        """
+        try:
+            toolbars = self.findChildren(QToolBar)
+        except Exception:
+            toolbars = []
+
+        if not toolbars:
+            return
+
+        # Keep this scoped to toolbars inside the card only (won't affect app-wide toolbars)
+        tb_qss = """
+        QToolBar {
+            background: #f1f3f5;
+            border: 0px;
+            spacing: 6px;
+            padding: 2px;
+        }
+        QToolButton {
+            background: transparent;
+            padding: 4px;
+            border-radius: 4px;
+        }
+        QToolButton:hover {
+            background: #dee2e6;
+        }
+        QToolButton:pressed {
+            background: #ced4da;
+        }
+        """
+
+        for tb in toolbars:
+            try:
+                tb.setStyleSheet(tb_qss)
+            except Exception:
+                pass
 
     # --- Drag support (grab the header area) ---
     def _apply_resizing_rules(self):
@@ -280,7 +324,7 @@ class ChartBoard(QWidget):
                  get_df: Callable[[], pd.DataFrame],
                  columns: List[str],
                  get_df_full: Optional[Callable[[], pd.DataFrame]] = None,
-                 parent: Optional[Widget] = None,
+                 parent: Optional[QWidget] = None,
                  initial_rows: int = 1):
         super().__init__(parent)
         self.get_df = get_df
