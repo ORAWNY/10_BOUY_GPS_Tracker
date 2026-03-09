@@ -1,7 +1,6 @@
 # utils/alerts/distance_alert.py
 from __future__ import annotations
 from typing import Dict, Any, Optional, Tuple, List
-import math
 import pandas as pd
 
 from PyQt6.QtWidgets import (
@@ -12,29 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from utils.alerts import REGISTRY, register, AlertSpec, AlertHandler, EvalResult, Status, Host
-
-SENTINELS = {0, 0.0, 9999, 9999.0, -9999, -9999.0}
-
-
-def _clean_lat(s: pd.Series) -> pd.Series:
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.mask(s.isin(SENTINELS))
-    return s.where((s >= -90) & (s <= 90))
-
-
-def _clean_lon(s: pd.Series) -> pd.Series:
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.mask(s.isin(SENTINELS))
-    return s.where((s >= -180) & (s <= 180))
-
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371000.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return 2*R*math.atan2(math.sqrt(a), math.sqrt(1-a))
+from utils.geo_utils import haversine_m, clean_lat_series as _clean_lat, clean_lon_series as _clean_lon
 
 
 def _safe_series(df: pd.DataFrame, col: str) -> pd.Series:

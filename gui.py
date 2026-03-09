@@ -881,10 +881,6 @@ class MainWindow(QMainWindow):
         act_save_as.triggered.connect(self.save_project_as)
         m_proj.addActions([act_new, act_open, act_save, act_save_as])
 
-        act_launch_dash = QAction("Launch Dashboard (Streamlit)…", self)
-        act_launch_dash.triggered.connect(self._launch_streamlit_dashboard)
-        m_proj.addAction(act_launch_dash)
-
         # User/Time settings
         m_proj.addSeparator()
         act_user_settings = QAction("User Settings…", self)
@@ -1577,47 +1573,6 @@ class MainWindow(QMainWindow):
 
         # If force=True you might later decide to do a full rebuild; for now just refresh lightly.
         self.refresh_tabs_only()
-
-    # -------------- Streamlit launcher --------------
-    def _launch_streamlit_dashboard(self):
-        import shutil
-        from PyQt6.QtCore import QProcessEnvironment
-
-        streamlit_exe = shutil.which("streamlit")
-        if not streamlit_exe:
-            QMessageBox.critical(self, "Streamlit", "Streamlit is not installed or not on PATH.\n\nInstall with:  pip install streamlit plotly pydeck")
-            return
-
-        base_dir = os.path.dirname(__file__)
-        script_path = os.path.join(base_dir, "utils", "streamlit_dashboard", "streamlit_app.py")
-        if not os.path.exists(script_path):
-            QMessageBox.critical(self, "Dashboard", f"Dashboard script not found:\n{script_path}")
-            return
-
-        args = ["run", script_path, "--"]
-        if self.db_path:
-            args += ["--db", os.path.abspath(self.db_path)]
-        if self.project_path:
-            args += ["--project", os.path.abspath(self.project_path)]
-
-        self.activity.log(f"Launching dashboard: {streamlit_exe} {' '.join(args)}")
-
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-
-        qenv = QProcessEnvironment.systemEnvironment()
-        if self.db_path:
-            qenv.insert("BUOY_DB", os.path.abspath(self.db_path))
-        if self.project_path:
-            qenv.insert("BUOY_PROJECT", os.path.abspath(self.project_path))
-        proc.setProcessEnvironment(qenv)
-
-        proc.readyReadStandardOutput.connect(lambda:
-            self.activity.log(bytes(proc.readAllStandardOutput()).decode("utf-8", errors="ignore").rstrip())
-        )
-        proc.start(streamlit_exe, args)
-        if not proc.waitForStarted(4000):
-            QMessageBox.critical(self, "Dashboard", "Failed to start Streamlit.")
 
     # -------------- Helpers --------------
     def _set_ui_theme(self, theme: str, accent: str):

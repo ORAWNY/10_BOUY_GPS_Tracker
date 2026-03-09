@@ -1,7 +1,6 @@
 # alerts.py
 import os
 import json
-import math
 import sqlite3
 import datetime
 from typing import List, Optional
@@ -21,23 +20,8 @@ try:
 except Exception:  # pragma: no cover
     win32 = None
 
-# --- BAD VALUE FILTERS FOR LAT/LON ---
-SENTINELS = {0, 0.0, 9999, 9999.0, -9999, -9999.0}
-
-def _clean_lat_series(s: pd.Series) -> pd.Series:
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.mask(s.isin(SENTINELS))
-    # keep only plausible degrees
-    return s.where((s >= -90) & (s <= 90))
-
-def _clean_lon_series(s: pd.Series) -> pd.Series:
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.mask(s.isin(SENTINELS))
-    return s.where((s >= -180) & (s <= 180))
-
-
-# -------------------- Config: hard-coded Outlook account --------------------
-OUTLOOK_ACCOUNT_DISPLAY_NAME = "Metocean Configuration"
+from utils.constants import SENTINEL_VALUES as SENTINELS, OUTLOOK_ACCOUNT_DISPLAY_NAME
+from utils.geo_utils import haversine_m, clean_lat_series as _clean_lat_series, clean_lon_series as _clean_lon_series
 
 
 # -------------------- DB bootstrap --------------------
@@ -80,17 +64,6 @@ def ensure_alerts_settings_log_table(db_path: str):
     """)
     conn.commit()
     conn.close()
-
-
-# -------------------- utility --------------------
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in meters."""
-    R = 6371000.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def fmt_duration(secs: float) -> str:

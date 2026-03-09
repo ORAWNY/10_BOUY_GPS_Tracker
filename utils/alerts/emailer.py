@@ -9,7 +9,7 @@ try:
 except Exception:
     win32 = None
 
-OUTLOOK_ACCOUNT_DISPLAY_NAME = "Metocean Configuration"
+from utils.constants import OUTLOOK_ACCOUNT_DISPLAY_NAME
 
 def send_email_outlook(subject: str, body: str, recipients: List[str], attachment_path: Optional[str] = None):
     if win32 is None:
