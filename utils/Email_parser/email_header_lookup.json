@@ -132,6 +132,56 @@
       }
     },
 
+    "300534064799850@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "SEAI_L9",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
+    "300534064793860@rockblock.rock7.com": {
+      "formats": {
+        "S": {
+          "prefix": "SEAI_L3",
+          "columns": ["Email_No","C_S","C_L","date","Volt","Bat1","Bat2","Bat3","col9","col10","Lat","Lon","col12","col13","col14"],
+          "emit_d": {
+            "xyz_from": "C_S",
+            "tag_from": "C_L",
+            "timestamp_field": "date",
+            "k1": "K1",
+            "m2": "M2",
+            "battery_label": "BATTERY",
+            "battery_value": "12",
+            "param_order": ["Volt","Bat1","Bat2","Bat3","Lat","Lon","col9","col10","col12","col13","col14"],
+            "param_labels": {"Bat1":"bat1","Bat2":"bat2","Bat3":"bat3"}
+          }
+        },
+        "D": {
+          "prefix": "F5",
+          "columns": ["TAG","XYZ","Volt","A2","A3","Temp5m","Turbidity","DO","col5","col6","col7","col8","col9","col10","Lat","Lon","col13","col14"],
+          "label_map": {"Battery":"Volt","Tempat5m":"Temp5m","Turbidity":"Turbidity","DO":"DO"}
+        }
+      }
+    },
+
     "300534064796890@rockblock.rock7.com": {
       "formats": {
         "S": {

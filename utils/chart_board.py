@@ -227,11 +227,15 @@ class ChartCardWidget(QWidget):
             # If the renderer exposes a canvas, leave it alone (GIS manages it)
         else:
             # Fit-to-cell: ignore size hints so layout can shrink/grow freely
-            self.renderer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            # Allow width to shrink, but keep height expanding so axes don't get clipped
+            self.renderer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            self.renderer.setMinimumHeight(220)  # tweak if you want
+
             # Common case: matplotlib canvas nested inside the renderer
             try:
                 if hasattr(self.renderer, "canvas") and hasattr(self.renderer.canvas, "setSizePolicy"):
-                    self.renderer.canvas.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+                    self.renderer.canvas.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+                    self.renderer.canvas.setMinimumHeight(200)
             except Exception:
                 pass
 
@@ -372,7 +376,7 @@ class ChartBoard(QWidget):
         self.vsplit = QSplitter(Qt.Orientation.Vertical, self.content)
         self.vsplit.setChildrenCollapsible(False)
         self.vsplit.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-        content_layout.addWidget(self.vsplit, stretch=0, alignment=Qt.AlignmentFlag.AlignTop)
+        content_layout.addWidget(self.vsplit, 1)
 
         # Empty state (below splitter)
         self.empty_frame = QFrame(self.content)
@@ -887,26 +891,3 @@ class ChartBoard(QWidget):
 
         self._set_focused_card(card)
         self.changed.emit()
-
-    # ---------- Helper from earlier ----------
-    def _ensure_fill_when_empty(self):
-        has_any = any(r.items for r in self.rows)
-        if not has_any:
-            if getattr(self, "_empty_fill", None) is None:
-                filler = QWidget(self.vsplit)
-                filler.setObjectName("board_empty_filler")
-                filler.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-                filler.setMinimumHeight(280)
-                self.vsplit.addWidget(filler)
-                self._empty_fill = filler
-        else:
-            if getattr(self, "_empty_fill", None) is not None:
-                self.vsplit.hide()
-                try:
-                    self.vsplit.removeWidget(self._empty_fill)
-                except Exception:
-                    pass
-                self._empty_fill.setParent(None)
-                self._empty_fill.deleteLater()
-                self._empty_fill = None
-                self.vsplit.show()

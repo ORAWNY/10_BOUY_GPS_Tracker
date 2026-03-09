@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 
 from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts import REGISTRY, AlertSpec
+from utils.alerts import summary_stale_alerts as stale_mod
 
 # Force registration of the Stale handler (ensures REGISTRY["Stale"] exists)
 try:
@@ -383,7 +384,7 @@ class SummaryPage(QWidget):
         self.db_path = db_path
         self.alerts_provider = alerts_provider
 
-        self._db_tables = _list_user_tables(self.db_path)
+        self._db_tables = stale_mod.list_user_tables(self.db_path)
         self._state = SummaryState(
             selected_tables=list(self._db_tables),
             columns=list(DEFAULT_COLS),
@@ -455,14 +456,14 @@ class SummaryPage(QWidget):
         return self._state.to_json()
 
     def import_state(self, data: Dict[str, Any]):
-        self._db_tables = _list_user_tables(self.db_path)
+        self._db_tables = stale_mod.list_user_tables(self.db_path)
         self._state = SummaryState.from_json(data or {}, db_tables=self._db_tables)
         self.refresh_from_db()
 
     # ---------------- pickers / settings ----------------
 
     def _pick_projects(self):
-        self._db_tables = _list_user_tables(self.db_path)
+        self._db_tables = stale_mod.list_user_tables(self.db_path)
         dlg = _PickListDialog(
             "Select projects to show",
             items=list(self._db_tables),
@@ -495,6 +496,72 @@ class SummaryPage(QWidget):
             self.refresh_from_db()
 
     # ---------------- click handling ----------------
+    # ---------------- stale alert syncing (single source of truth) ----------------
+
+    def _provider_find_stale(self, table: str) -> Optional[AlertSpec]:
+        """
+        Ask the alerts_provider for the *canonical* Stale alert for this table.
+
+        We intentionally duck-type this so it works with whatever your Alerts tab/manager exposes.
+        Supported provider methods (first match wins):
+          - get_stale_alert(table) -> AlertSpec|None
+          - find_alert(table, kind) -> AlertSpec|None
+          - get_alert(table, kind) -> AlertSpec|None
+        """
+        ap = self.alerts_provider
+        if ap is None:
+            return None
+
+        for fn_name in ("get_stale_alert", "find_alert", "get_alert"):
+            fn = getattr(ap, fn_name, None)
+            if callable(fn):
+                try:
+                    # common conventions
+                    if fn_name == "get_stale_alert":
+                        spec = fn(table)
+                    else:
+                        spec = fn(table, "Stale")
+                    if isinstance(spec, AlertSpec):
+                        return spec
+                except Exception:
+                    pass
+        return None
+
+    def _provider_upsert_alert(self, table: str, spec: AlertSpec) -> None:
+        """
+        Persist the spec back into the alerts system.
+        Supported provider methods:
+          - upsert_alert(table, spec)
+          - save_alert(table, spec)
+          - set_alert(table, spec)
+        """
+        ap = self.alerts_provider
+        if ap is None:
+            return
+
+        for fn_name in ("upsert_alert", "save_alert", "set_alert"):
+            fn = getattr(ap, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(table, spec)
+                    return
+                except Exception:
+                    pass
+
+    def _get_canonical_stale_spec(self, table: str) -> AlertSpec:
+        """
+        Return the *single* alert spec we should use for 'Since last'.
+        Priority:
+          1) alerts_provider's stored Stale alert (canonical)
+          2) SummaryState fallback (legacy)
+        """
+        # 1) canonical from provider
+        spec = self._provider_find_stale(table)
+        if spec is not None:
+            return spec
+
+        # 2) fallback: build from SummaryState (your current behavior)
+        payload = self._state.stale_cfg_for(table)
 
     def _on_cell_clicked(self, row: int, col: int):
         headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
@@ -540,7 +607,11 @@ class SummaryPage(QWidget):
             QMessageBox.critical(self, "Since last", str(e))
             return
 
-        # Persist any edits made in the dialog
+        # Persist edits:
+        # 1) If we have an alerts_provider, save back into the canonical alert store
+        self._provider_upsert_alert(table, spec)
+
+        # 2) Also keep SummaryState in sync as fallback/legacy (optional but safe)
         try:
             self._state.set_stale_cfg(table, dict(spec.payload or {}))
         except Exception:
@@ -771,15 +842,7 @@ class SummaryPage(QWidget):
         if not row:
             return
 
-        payload = self._state.stale_cfg_for(table)
-        spec = AlertSpec(
-            id=table,
-            kind="Stale",
-            name=f"Since last — {table}",
-            enabled=True,
-            recipients=list(payload.get("recipients", []) or []),
-            payload=payload,
-        )
+        spec = self._get_canonical_stale_spec(table)
 
         handler = REGISTRY.get("Stale")
         if not handler:
