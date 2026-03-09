@@ -16,6 +16,7 @@ from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtCore import Qt
 
 from utils.alerts import REGISTRY, register, AlertSpec, AlertHandler, EvalResult, Status, Host
+from utils.constants import SENTINEL_VALUES
 from utils.time_settings import local_zone, parse_series_to_local_naive
 
 
@@ -468,15 +469,15 @@ class _MissingDataViewerDialog(QDialog):
             zero_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == 0)
             n9999_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == -9999)
             p9999_mask = s.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and x == 9999)
-            nan_mask = s.isna()
-            bad_mask = empty_mask | zero_mask | n9999_mask | p9999_mask | nan_mask
+            nan_mask   = s.isna()
+            bad_mask   = empty_mask | zero_mask | n9999_mask | p9999_mask | nan_mask
 
             total = int(s.shape[0])
             good = int(total - int(bad_mask.sum()))
             availability = 100.0 * good / total if total else 0.0
 
             # numeric stats on valid numbers only
-            num = pd.to_numeric(s, errors="coerce").mask(lambda x: x.isin([0, 9999, -9999]))
+            num = pd.to_numeric(s, errors="coerce").mask(lambda x: x.isin(SENTINEL_VALUES))
             num_valid = num.dropna()
 
             out["Usual gap (median)"][c] = fmt_td(med_gap)
@@ -540,7 +541,7 @@ class _MissingDataViewerDialog(QDialog):
                     is_bad = (
                         pd.isna(val)
                         or (isinstance(val, str) and val.strip() == "")
-                        or (isinstance(val, (int, float, np.integer, np.floating)) and val in {0, 9999, -9999})
+                        or (isinstance(val, (int, float, np.integer, np.floating)) and val in SENTINEL_VALUES)
                     )
                     bads.append(is_bad)
                 self.data_grid.append_row(ts, vals, bg_mask=bads)
