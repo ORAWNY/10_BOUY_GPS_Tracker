@@ -71,9 +71,26 @@ QPushButton[flat="true"]:hover { background: #eff8fd; }
 
 /* Checkboxes & Radios */
 QCheckBox, QRadioButton { padding: 3px; color: #374151; }
-QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; }
-QCheckBox::indicator:checked { background:#0ea5e9; border:1px solid #0ea5e9; }
-QRadioButton::indicator:checked { background:#0ea5e9; border:1px solid #0ea5e9; }
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #9ca3af;
+    border-radius: 3px;
+    background: #ffffff;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #0ea5e9;
+    background: #f0f9ff;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: #0ea5e9;
+    border: 2px solid #0284c7;
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: #d1d5db;
+    background: #f3f4f6;
+}
 
 /* Tabs */
 QTabWidget::pane {

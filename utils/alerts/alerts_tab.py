@@ -33,6 +33,80 @@ from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts.view_helpers import enrich_extra_for_log
 
 
+# ------------------------- alert chart helper -------------------------
+
+def _generate_alert_chart(host, spec) -> Optional[str]:
+    """
+    Generate a gap-timeline chart for the last 12 hours and return
+    the path to a temporary PNG file, or None on failure.
+    Caller is responsible for deleting the file after use.
+    """
+    import tempfile, os
+    try:
+        import matplotlib
+        matplotlib.use("Agg")   # non-interactive backend, safe in any thread
+        from matplotlib.figure import Figure
+        import matplotlib.dates as mdates
+    except Exception:
+        return None
+
+    try:
+        df   = getattr(host, "df", None)
+        tcol = getattr(host, "datetime_col", None)
+        if df is None or df.empty or not tcol or tcol not in df.columns:
+            return None
+
+        ts = parse_series_to_local_naive(df[tcol]).dropna().sort_values()
+        if ts.empty:
+            return None
+
+        # Restrict to last 12 hours
+        t_end   = ts.max()
+        t_start = t_end - pd.Timedelta(hours=12)
+        ts      = ts[(ts >= t_start) & (ts <= t_end)]
+        if len(ts) < 2:
+            return None
+
+        gaps_s = ts.diff().dropna().dt.total_seconds()
+        t_ends = ts.iloc[1:]
+
+        p         = spec.payload or {}
+        amber_min = int(p.get("amber_min", p.get("threshold_min", 30)))
+        red_min   = int(p.get("red_min", max(amber_min * 2, 60)))
+
+        fig = Figure(figsize=(8, 3.2), tight_layout=True)
+        ax  = fig.add_subplot(111)
+
+        ax.plot(t_ends, gaps_s / 60.0, linewidth=1.5, color="#0ea5e9", zorder=3)
+        ax.axhline(amber_min, color="#f59f00", linestyle="--", linewidth=1,
+                   label=f"Amber ≥ {amber_min} min")
+        ax.axhline(red_min,   color="#e03131", linestyle="--", linewidth=1,
+                   label=f"Red ≥ {red_min} min")
+
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+        ax.xaxis.set_major_locator(locator)
+        try:
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        except Exception:
+            pass
+
+        ax.set_title(
+            f"{getattr(host, 'table_name', '')} — gap timeline (last 12 h)",
+            fontsize=10,
+        )
+        ax.set_xlabel("Time (local)")
+        ax.set_ylabel("Gap (min)")
+        ax.grid(True, linestyle="--", color="#e5e7eb", alpha=0.7)
+        ax.legend(fontsize=8)
+
+        fd, path = tempfile.mkstemp(suffix=".png", prefix="alert_chart_")
+        os.close(fd)
+        fig.savefig(path, dpi=120)
+        return path
+    except Exception:
+        return None
+
+
 # ------------------------- robust logging wrapper -------------------------
 
 def _make_log_fn(host, logger: Optional[Callable[[str], None]] = None) -> Callable[[str], None]:
@@ -1164,8 +1238,13 @@ class AlertsTab(QWidget):
                                     f"Observed: {observed}\n"
                                     f"Details: {summary}"
                                 )
+                                chart_path = None
                                 try:
-                                    send_email_outlook(subj, body, recipients, None)
+                                    chart_path = _generate_alert_chart(self.host, spec)
+                                except Exception:
+                                    pass
+                                try:
+                                    send_email_outlook(subj, body, recipients, chart_path)
                                     self._log(f"[alerts] Email sent → {', '.join(recipients)} | {spec.name}")
                                     write_last_email(self.db_path, self.host.table_name, key, cur_status)
                                     self._write_alerts_log(
@@ -1187,6 +1266,13 @@ class AlertsTab(QWidget):
                                         notes=f"{e}",
                                         spec=spec
                                     )
+                                finally:
+                                    if chart_path:
+                                        try:
+                                            import os as _os
+                                            _os.unlink(chart_path)
+                                        except Exception:
+                                            pass
 
                     # Persist the new status after handling transition/email
                     write_last_status(self.db_path, self.host.table_name, key, cur_status, observed)

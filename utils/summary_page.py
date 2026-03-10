@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import (
 from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts import REGISTRY, AlertSpec
 from utils.alerts import summary_stale_alerts as stale_mod
+from utils.alerts.evaluator import load_specs
+from utils.alerts.store import ensure_alerts_tables, read_last_status
 
 # Force registration of the Stale handler (ensures REGISTRY["Stale"] exists)
 try:
@@ -124,11 +126,12 @@ def _status_color(level: str) -> QColor:
 
 # ------------------------- Columns -------------------------
 
-DEFAULT_COLS = ["Project", "Count", "Last time", "Since last", "Std gap"]
-ALL_AVAILABLE_COLS = list(DEFAULT_COLS)
+DEFAULT_COLS       = ["Project", "Since last", "Alerts", "Last DP"]
+ALL_AVAILABLE_COLS = ["Project", "Count", "Since last", "Alerts", "Last DP", "First DP"]
 
-# Custom data role for the stale level stored on the "Since last" items
+# Custom data roles
 ROLE_SINCE_LEVEL = int(Qt.ItemDataRole.UserRole) + 1
+ROLE_ALERTS      = int(Qt.ItemDataRole.UserRole) + 2  # list of (char, level, enabled)
 
 
 # ------------------------- Delegate (the important bit) -------------------------
@@ -169,6 +172,72 @@ class SinceLastDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return super().sizeHint(option, index)
 
+
+# Kind char → display letter
+_KIND_LETTER = {"Stale": "S", "Threshold": "T", "MissingData": "M", "Distance": "D"}
+# Fallback: first letter of kind
+_BADGE_SIZE = 18   # diameter of each coloured circle
+_BADGE_GAP  = 3    # gap between badges
+
+
+class AlertsDelegate(QStyledItemDelegate):
+    """
+    Paint the Alerts column as a strip of coloured letter-badge circles.
+
+    Each badge represents one alert for the table.
+    Colour = status level (green/amber/red/off/unknown).
+    Letter = first char of kind (S=Stale, T=Threshold, M=MissingData, D=Distance).
+    Greyed-out if enabled=False.
+
+    Data is stored on the cell via ROLE_ALERTS:
+        List[Tuple[str, str, bool]]   →   (kind_char, level, enabled)
+    """
+
+    def paint(self, painter: QPainter, option, index):
+        badges = index.data(ROLE_ALERTS)
+
+        # Let Qt draw the standard cell background first
+        super().paint(painter, option, index)
+
+        if not badges:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        r = option.rect
+        x = r.left() + 4
+        cy = r.top() + r.height() // 2
+
+        for kind_char, level, enabled in badges:
+            color = _status_color(level)
+            if not enabled:
+                color = QColor("#adb5bd")   # grey-out disabled alerts
+
+            # Circle
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(x, cy - _BADGE_SIZE // 2, _BADGE_SIZE, _BADGE_SIZE)
+
+            # Letter
+            painter.setPen(QPen(QColor("#ffffff")))
+            fr = QRect(x, cy - _BADGE_SIZE // 2, _BADGE_SIZE, _BADGE_SIZE)
+            painter.drawText(
+                fr,
+                int(Qt.AlignmentFlag.AlignCenter),
+                kind_char[:1].upper(),
+            )
+            x += _BADGE_SIZE + _BADGE_GAP
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        badges = index.data(ROLE_ALERTS)
+        n = len(badges) if badges else 0
+        w = max(40, n * (_BADGE_SIZE + _BADGE_GAP) + 8)
+        h = max(super().sizeHint(option, index).height(), _BADGE_SIZE + 6)
+        from PyQt6.QtCore import QSize
+        return QSize(w, h)
 
 
 # ------------------------- Config -------------------------
@@ -216,9 +285,24 @@ class SummaryState:
             sel = list(db_tables)
 
         cols = d.get("columns") or []
-        cols = [c for c in cols if c in ALL_AVAILABLE_COLS]
+        # Migrate old column names
+        _rename = {"Std gap": None, "Avg gap": None, "Last time": "Last DP"}
+        migrated = []
+        for c in cols:
+            if c in _rename:
+                replacement = _rename[c]
+                if replacement and replacement not in migrated:
+                    migrated.append(replacement)
+                # None → drop the column (now merged into Since last)
+            else:
+                migrated.append(c)
+        cols = [c for c in migrated if c in ALL_AVAILABLE_COLS]
         if not cols:
             cols = list(DEFAULT_COLS)
+        # Add any new DEFAULT_COLS that weren't in the saved state
+        for dc in DEFAULT_COLS:
+            if dc not in cols:
+                cols.append(dc)
 
         sample = int(d.get("sample_limit") or 20000)
         sample = max(2000, min(sample, 200000))
@@ -562,18 +646,44 @@ class SummaryPage(QWidget):
 
         # 2) fallback: build from SummaryState (your current behavior)
         payload = self._state.stale_cfg_for(table)
+        return stale_mod.build_spec_for_table(table, payload)
 
     def _on_cell_clicked(self, row: int, col: int):
         headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
         if col < 0 or col >= len(headers):
-            return
-        if headers[col] != "Since last":
             return
 
         table = self._table_name_from_row(row, headers)
         if not table:
             return
 
+        if headers[col] == "Alerts":
+            self._open_alerts_dialog(table)
+            return
+
+        if headers[col] != "Since last":
+            return
+
+        self._open_stale_viewer(table)
+
+    def _open_alerts_dialog(self, table: str):
+        """Open the TableAlertsDialog for per-table alert management."""
+        try:
+            from utils.alerts.alerts_panel import TableAlertsDialog
+        except Exception as e:
+            QMessageBox.critical(self, "Alerts", f"Could not load alerts panel:\n{e}")
+            return
+
+        dlg = TableAlertsDialog(
+            db_path=self.db_path,
+            table_name=table,
+            parent=self,
+        )
+        dlg.exec()
+        # Refresh alerts column for this table after dialog closes
+        self._refresh_alerts_cell_for_table(table)
+
+    def _open_stale_viewer(self, table: str):
         host = self._build_host_for_stale(table, for_viewer=True)
         if host is None:
             QMessageBox.information(self, "Since last", f"Could not load data for {table}.")
@@ -719,6 +829,7 @@ class SummaryPage(QWidget):
                         "count": count,
                         "last_dt": last_dt,
                         "last_time_str": _fmt_dt(last_dt),
+                        "first_time_str": prev.get("first_time_str", "—"),
                         "std_gap_str": prev.get("std_gap_str", "—"),
                         "std_gap_tip": prev.get("std_gap_tip", ""),
                         "since_last_level": prev.get("since_last_level", "unknown"),
@@ -754,10 +865,10 @@ class SummaryPage(QWidget):
                         new_cache[table] = {"table": table, "count": 0, "last_dt": None, "dt_col": None}
                         continue
 
-                    # cheap stats: COUNT + MAX(dt)
+                    # cheap stats: COUNT + MAX(dt) + MIN(dt)
                     try:
                         df_basic = pd.read_sql_query(
-                            f'SELECT COUNT(1) AS n, MAX("{dt_col}") AS mx FROM "{table}"',
+                            f'SELECT COUNT(1) AS n, MAX("{dt_col}") AS mx, MIN("{dt_col}") AS mn FROM "{table}"',
                             conn,
                         )
                     except Exception:
@@ -765,6 +876,7 @@ class SummaryPage(QWidget):
 
                     count = 0
                     last_dt: Optional[pd.Timestamp] = None
+                    first_dt: Optional[pd.Timestamp] = None
                     if not df_basic.empty:
                         try:
                             count = int(df_basic.loc[0, "n"] or 0)
@@ -776,8 +888,14 @@ class SummaryPage(QWidget):
                             last_dt = mx.iloc[0] if not mx.empty else None
                         except Exception:
                             last_dt = None
+                        try:
+                            mn_s = pd.Series([df_basic.loc[0, "mn"]])
+                            mn = parse_series_to_local_naive(mn_s).dropna()
+                            first_dt = mn.iloc[0] if not mn.empty else None
+                        except Exception:
+                            first_dt = None
 
-                    # "Std gap": typical cadence estimate (mode of binned deltas)
+                    # "Avg gap": mean of positive inter-message gaps (matches project tab calculation)
                     std_gap_str = "—"
                     std_gap_tip = ""
                     if count >= 2:
@@ -800,23 +918,10 @@ class SummaryPage(QWidget):
                                     sec = deltas.dt.total_seconds().astype(float)
                                     sec = sec[sec > 0]
                                     if not sec.empty:
-                                        bucket_s = 60.0  # 1-minute buckets
-                                        binned = (sec / bucket_s).round() * bucket_s
-
-                                        q1 = binned.quantile(0.25)
-                                        q3 = binned.quantile(0.75)
-                                        iqr = max(1.0, float(q3 - q1))
-                                        cutoff = float(q3 + 3.0 * iqr)
-                                        regular = binned[binned <= cutoff]
-                                        if regular.empty:
-                                            regular = binned
-
-                                        vc = regular.value_counts()
-                                        typical_s = float(vc.index[0])
-                                        std_gap_str = _fmt_td(pd.Timedelta(seconds=typical_s))
+                                        avg_s = float(sec.mean())
+                                        std_gap_str = _fmt_td(pd.Timedelta(seconds=avg_s))
                                         std_gap_tip = (
-                                            f"Typical gap (mode) using {bucket_s:.0f}s bins; "
-                                            f"n={int(regular.shape[0])} gaps; cutoff={int(cutoff)}s."
+                                            f"Average gap (mean) from {int(sec.shape[0])} intervals."
                                         )
 
                     new_cache[table] = {
@@ -825,6 +930,7 @@ class SummaryPage(QWidget):
                         "count": count,
                         "last_dt": last_dt,
                         "last_time_str": _fmt_dt(last_dt),
+                        "first_time_str": _fmt_dt(first_dt),
                         "std_gap_str": std_gap_str,
                         "std_gap_tip": std_gap_tip,
                     }
@@ -917,10 +1023,12 @@ class SummaryPage(QWidget):
         Important: set the delegate AFTER columns exist (and after re-render),
         otherwise Qt may ignore it for new models/headers.
         """
-        if "Since last" not in cols:
-            return
-        since_col = cols.index("Since last")
-        self.table.setItemDelegateForColumn(since_col, SinceLastDelegate(self.table))
+        if "Since last" in cols:
+            since_col = cols.index("Since last")
+            self.table.setItemDelegateForColumn(since_col, SinceLastDelegate(self.table))
+        if "Alerts" in cols:
+            alerts_col = cols.index("Alerts")
+            self.table.setItemDelegateForColumn(alerts_col, AlertsDelegate(self.table))
 
     def _render_from_cache(self):
         tables_live = set(_list_user_tables(self.db_path))
@@ -937,11 +1045,12 @@ class SummaryPage(QWidget):
         self.table.setRowCount(len(tables))
 
         tips = {
-            "Project": "SQLite table name (one project per table).",
-            "Count": "Total number of rows in the table.",
-            "Last time": "Timestamp of the most recent datapoint (from last Refresh).",
-            "Since last": "Time since the most recent datapoint. Click to view chart and edit thresholds/email settings.",
-            "Std gap": "Typical cadence estimate from recent datapoints (computed on Refresh).",
+            "Project":    "SQLite table name (one project per table).",
+            "Count":      "Total number of rows in the table.",
+            "Since last": "Time since the most recent datapoint  ·  average gap. Click to view chart and edit thresholds.",
+            "Alerts":     "Alert status per type. Click to manage alerts for this table.",
+            "Last DP":    "Timestamp of the most recent datapoint (from last Refresh).",
+            "First DP":   "Timestamp of the earliest datapoint in the table.",
         }
         for i, name in enumerate(cols):
             hi = QTableWidgetItem(name)
@@ -971,20 +1080,37 @@ class SummaryPage(QWidget):
                 elif colname == "Count":
                     self.table.setItem(r, c, QTableWidgetItem(str(row.get("count", "—"))))
 
-                elif colname == "Last time":
-                    self.table.setItem(r, c, QTableWidgetItem(row.get("last_time_str", "—")))
-
                 elif colname == "Since last":
-                    # ✅ Do NOT setForeground/setBackground here.
-                    # We store level as data; the delegate paints it reliably.
-                    it = QTableWidgetItem(since_last_str)
+                    # Combined: "2h 30m  ·  avg 45m"
+                    avg_str = row.get("std_gap_str", "—")
+                    combined = f"{since_last_str}  ·  {avg_str}"
+                    it = QTableWidgetItem(combined)
                     it.setData(ROLE_SINCE_LEVEL, str(since_last_level))
-                    it.setToolTip(since_last_tip)
+                    tip = since_last_tip
+                    if row.get("std_gap_tip"):
+                        tip = f"{tip}\n{row['std_gap_tip']}" if tip else row["std_gap_tip"]
+                    it.setToolTip(tip)
                     self.table.setItem(r, c, it)
 
-                elif colname == "Std gap":
-                    it = QTableWidgetItem(row.get("std_gap_str", "—"))
-                    it.setToolTip(row.get("std_gap_tip", ""))
+                elif colname == "Alerts":
+                    badges = self._load_alerts_status(table_name)
+                    it = QTableWidgetItem("")
+                    it.setData(ROLE_ALERTS, badges)
+                    tip_parts = [
+                        f"{ch}={'ON' if en else 'off'} ({lvl})"
+                        for ch, lvl, en in badges
+                    ]
+                    it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured. Click to add.")
+                    self.table.setItem(r, c, it)
+
+                elif colname == "Last DP":
+                    it = QTableWidgetItem(row.get("last_time_str", "—"))
+                    it.setToolTip("Most recent datapoint timestamp.")
+                    self.table.setItem(r, c, it)
+
+                elif colname == "First DP":
+                    it = QTableWidgetItem(row.get("first_time_str", "—"))
+                    it.setToolTip("Earliest datapoint timestamp in this table.")
                     self.table.setItem(r, c, it)
 
                 else:
@@ -1026,16 +1152,81 @@ class SummaryPage(QWidget):
             since_td = now_local - last_dt
             since_str = _fmt_td(since_td)
             level = self._fallback_level_from_last_dt(table)
+            avg_str = row.get("std_gap_str", "—")
+            combined = f"{since_str}  ·  {avg_str}"
 
             it_since = self.table.item(r, col_since)
             if not it_since:
                 it_since = QTableWidgetItem()
                 self.table.setItem(r, col_since, it_since)
 
-            it_since.setText(since_str)
+            it_since.setText(combined)
             it_since.setData(ROLE_SINCE_LEVEL, str(level))
 
         # repaint only once at end
+        self.table.viewport().update()
+
+    # ---------------- alerts status helpers ----------------
+
+    # Maps AlertSpec kind → badge character
+    _KIND_TO_CHAR = {"Stale": "S", "Threshold": "T", "MissingData": "M", "Distance": "D"}
+
+    def _load_alerts_status(self, table: str) -> List[tuple]:
+        """
+        Return [(kind_char, level, enabled), ...] for all saved alert specs for *table*.
+        Reads persisted last-status from the state DB (no evaluation).
+        """
+        try:
+            specs = load_specs(self.db_path, table)
+        except Exception:
+            specs = []
+
+        result = []
+        for spec in specs:
+            kind_char = self._KIND_TO_CHAR.get(spec.kind, spec.kind[:1].upper())
+            enabled = bool(getattr(spec, "enabled", True))
+            if not enabled:
+                result.append((kind_char, "off", False))
+                continue
+            # Read last persisted status from state DB
+            try:
+                raw = read_last_status(self.db_path, table, str(spec.id))
+            except Exception:
+                raw = None
+            level = _status_to_level(raw) if raw else "unknown"
+            result.append((kind_char, level, True))
+
+        return result
+
+    def _refresh_alerts_cell_for_table(self, table: str):
+        """Update just the Alerts cell for *table* after dialog closes (no full re-render)."""
+        headers = [
+            self.table.horizontalHeaderItem(i).text()
+            for i in range(self.table.columnCount())
+        ]
+        if "Alerts" not in headers or "Project" not in headers:
+            return
+        col_alerts = headers.index("Alerts")
+        col_proj = headers.index("Project")
+        for r in range(self.table.rowCount()):
+            it_proj = self.table.item(r, col_proj)
+            if not it_proj:
+                continue
+            row_table = str(it_proj.data(Qt.ItemDataRole.UserRole) or it_proj.text())
+            if row_table != table:
+                continue
+            badges = self._load_alerts_status(table)
+            it = self.table.item(r, col_alerts)
+            if it is None:
+                it = QTableWidgetItem("")
+                self.table.setItem(r, col_alerts, it)
+            it.setData(ROLE_ALERTS, badges)
+            tip_parts = [
+                f"{ch}={'ON' if en else 'off'} ({lvl})"
+                for ch, lvl, en in badges
+            ]
+            it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured.")
+            break
         self.table.viewport().update()
 
     # ---------------- host builder for stale viewer/editor ----------------

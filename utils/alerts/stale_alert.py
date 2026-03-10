@@ -11,84 +11,160 @@ from matplotlib.figure import Figure
 
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QSpinBox, QCheckBox, QPushButton, QVBoxLayout,
-    QLineEdit, QComboBox, QLabel, QToolButton, QHBoxLayout,
+    QLineEdit, QComboBox, QLabel, QToolButton, QHBoxLayout, QWidget,
+    QListWidget, QListWidgetItem,
     QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem
 )
 
+from PyQt6.QtCore import Qt
 from utils.alerts import register, AlertSpec, AlertHandler, EvalResult, Status, Host
 from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.time_utils import fmt_duration
 
 
+# ── Days / Hours / Minutes compound input ─────────────────────────────────────
+class _DhmWidget(QWidget):
+    """Compound days / hours / minutes spinbox. Value is stored as total minutes."""
+
+    def __init__(self, total_minutes: int, parent=None):
+        super().__init__(parent)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+
+        d, rem = divmod(max(0, int(total_minutes)), 1440)
+        hr, mn = divmod(rem, 60)
+
+        self._d = QSpinBox(); self._d.setRange(0, 365);  self._d.setValue(d);  self._d.setSuffix(" d")
+        self._h = QSpinBox(); self._h.setRange(0, 23);   self._h.setValue(hr); self._h.setSuffix(" h")
+        self._m = QSpinBox(); self._m.setRange(0, 59);   self._m.setValue(mn); self._m.setSuffix(" m")
+
+        for w in (self._d, self._h, self._m):
+            w.setFixedWidth(72)
+            h.addWidget(w)
+        h.addStretch(1)
+
+    def value_minutes(self) -> int:
+        return self._d.value() * 1440 + self._h.value() * 60 + self._m.value()
+
+
+# ── Table multi-select for "also_tables" ──────────────────────────────────────
+def _list_db_tables(db_path: str, exclude: str) -> List[str]:
+    """Return all user table names from the SQLite DB, excluding *exclude*."""
+    try:
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+            return [r[0] for r in rows if r[0] != exclude]
+    except Exception:
+        return []
+
+
+class _TablesWidget(QWidget):
+    """Scrollable checklist of DB tables for co-monitoring."""
+
+    def __init__(self, db_path: str, exclude: str, checked: List[str], parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        self._list = QListWidget(self)
+        self._list.setMaximumHeight(120)
+        self._list.setAlternatingRowColors(True)
+
+        tables = _list_db_tables(db_path, exclude)
+        checked_set = set(checked or [])
+        if tables:
+            for t in tables:
+                item = QListWidgetItem(t)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if t in checked_set else Qt.CheckState.Unchecked
+                )
+                self._list.addItem(item)
+            v.addWidget(self._list)
+        else:
+            lbl = QLabel("No other tables found in this database.", self)
+            lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+            v.addWidget(lbl)
+
+    def checked_tables(self) -> List[str]:
+        result = []
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                result.append(item.text())
+        return result
+
+
 class _Editor(QDialog):
     """
-    Editor supports:
-      - thresholds
-      - recipients / interval
-      - cooldown + email toggles (amber/red/escalation/recovery)
-      - also_tables (co-monitor other tables)
+    Editor for stale-data alert:
+      - Name
+      - AMBER / RED thresholds as Days / Hours / Minutes
+      - Also-check tables (checklist from DB)
+      - Recipients / check interval / cooldown
+      - Email trigger toggles
     """
     def __init__(self, spec: AlertSpec, host: Host, parent=None):
         super().__init__(parent)
         self.spec = spec
-        self._parent = parent  # AlertsTab (for _uniquify_name)
+        self._parent = parent
         self.setWindowTitle("Stale-data alert")
+        self.setMinimumWidth(460)
 
         lay = QVBoxLayout(self)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         lay.addLayout(form)
 
         p = self.spec.payload or {}
 
-        # Name
+        # ── Name ──
         self.name_edit = QLineEdit(spec.name or "Time since last data > thresholds")
         form.addRow("Alert name:", self.name_edit)
 
-        # Thresholds (minutes)
-        old_thr = int(p.get("threshold_min", 30))
+        # ── Thresholds as D / H / M ──
+        old_thr       = int(p.get("threshold_min", 30))
         amber_default = int(p.get("amber_min", old_thr))
-        red_default = int(p.get("red_min", max(amber_default * 2, 60)))
+        red_default   = int(p.get("red_min", max(amber_default * 2, 60)))
 
-        self.thr_amber = QSpinBox()
-        self.thr_amber.setRange(1, 10_000_000)
-        self.thr_amber.setValue(amber_default)
+        self.thr_amber = _DhmWidget(amber_default)
+        self.thr_red   = _DhmWidget(red_default)
+        form.addRow("AMBER threshold ≥", self.thr_amber)
+        form.addRow("RED threshold ≥",   self.thr_red)
 
-        self.thr_red = QSpinBox()
-        self.thr_red.setRange(1, 10_000_000)
-        self.thr_red.setValue(red_default)
+        # ── Also check tables (checklist) ──
+        db_path    = getattr(host, "db_path",    None) or ""
+        table_name = getattr(host, "table_name", None) or ""
+        also_now   = list(p.get("also_tables", []))
+        self.also_tables_widget = _TablesWidget(db_path, table_name, also_now)
+        form.addRow("Also check table(s):", self.also_tables_widget)
 
-        self.scope_all = QCheckBox("Use ALL data (alert on maximum gap)")
-        self.scope_all.setChecked(bool(p.get("scope_all", False)))
-
-        form.addRow("AMBER at (minutes) ≥", self.thr_amber)
-        form.addRow("RED at (minutes) ≥", self.thr_red)
-        form.addRow(self.scope_all)
-
-        # Additional tables
-        also_tables = ", ".join(p.get("also_tables", []))
-        self.also_tables_edit = QLineEdit(also_tables)
-        self.also_tables_edit.setPlaceholderText("e.g. support_inbox, accounts_inbox")
-        form.addRow("Also check table(s):", self.also_tables_edit)
-
-        # Recipients + interval
+        # ── Recipients + interval ──
         existing_rcpts = self.spec.recipients or p.get("recipients", [])
         self.recipients_edit = QLineEdit(", ".join(existing_rcpts))
         self.recipients_edit.setPlaceholderText("alice@company.com, bob@company.com")
 
         self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(1, 100000)
+        self.interval_spin.setRange(1, 100_000)
         self.interval_spin.setValue(int(p.get("interval_min", 15)))
+        self.interval_spin.setSuffix(" min")
 
         form.addRow("Email recipients:", self.recipients_edit)
-        form.addRow("Check interval (min):", self.interval_spin)
+        form.addRow("Check interval:",   self.interval_spin)
 
-        # Email throttle & toggles
+        # ── Cooldown ──
         self.cooldown_spin = QSpinBox()
-        self.cooldown_spin.setRange(0, 100000)
+        self.cooldown_spin.setRange(0, 100_000)
         self.cooldown_spin.setValue(int(p.get("email_cooldown_min", 240)))
-        form.addRow("Email cool-down (min):", self.cooldown_spin)
+        self.cooldown_spin.setSuffix(" min")
+        form.addRow("Email cool-down:", self.cooldown_spin)
 
-        # NEW: email on AMBER / RED toggles
+        # ── Email trigger checkboxes ──
         self.email_amber_cb = QCheckBox("Email when entering AMBER")
         self.email_amber_cb.setChecked(bool(p.get("email_on_amber", True)))
         form.addRow(self.email_amber_cb)
@@ -97,72 +173,65 @@ class _Editor(QDialog):
         self.email_red_cb.setChecked(bool(p.get("email_on_red", True)))
         form.addRow(self.email_red_cb)
 
-        # Existing escalation/recovery toggles
-        self.escalation_cb = QCheckBox("Email on escalation (AMBER→RED)")
+        self.escalation_cb = QCheckBox("Email on escalation (AMBER → RED)")
         self.escalation_cb.setChecked(bool(p.get("email_on_escalation", True)))
         form.addRow(self.escalation_cb)
 
-        self.recovery_cb = QCheckBox("Email on recovery (→GREEN)")
+        self.recovery_cb = QCheckBox("Email on recovery (→ GREEN)")
         self.recovery_cb.setChecked(bool(p.get("email_on_recovery", False)))
         form.addRow(self.recovery_cb)
 
         hint = QLabel(
-            "Status logic (per-source): < AMBER → GREEN, ≥ AMBER & < RED → AMBER, ≥ RED → RED.\n"
-            "Multiple tables: we use the best (lowest) staleness among them, so RED happens only if ALL are RED.\n"
-            "‘Use ALL data’ evaluates the maximum historical gap per table; otherwise it evaluates ‘time since last’ per table."
+            "Status logic (per-source): < AMBER → GREEN,  ≥ AMBER & < RED → AMBER,  ≥ RED → RED.\n"
+            "Multiple tables: the best (lowest) staleness is used — RED only when ALL sources are RED."
         )
-        hint.setStyleSheet("color:#666; font-size:11px;")
+        hint.setStyleSheet("color: #6b7280; font-size: 11px;")
         lay.addWidget(hint)
 
-        btn_ok = QPushButton("OK")
+        btn_ok = QPushButton("Save")
         btn_ok.clicked.connect(self.accept)
         lay.addWidget(btn_ok)
 
     def accept(self):
         p = self.spec.payload or {}
 
-        # Name (uniquify if AlertsTab provided)
+        # Name
         new_name = (self.name_edit.text() or "").strip()
         if new_name:
-            if hasattr(self._parent, "_uniquify_name") and callable(getattr(self._parent, "_uniquify_name")):
+            if hasattr(self._parent, "_uniquify_name") and callable(
+                getattr(self._parent, "_uniquify_name")
+            ):
                 self.spec.name = self._parent._uniquify_name(new_name, exclude_id=self.spec.id)
             else:
                 self.spec.name = new_name
 
         # Thresholds
-        amber = int(self.thr_amber.value())
-        red = int(self.thr_red.value())
+        amber = max(1, self.thr_amber.value_minutes())
+        red   = self.thr_red.value_minutes()
         if red < amber:
             red = amber
-        p["amber_min"] = amber
-        p["red_min"] = red
-        p["scope_all"] = bool(self.scope_all.isChecked())
-        p["threshold_min"] = amber  # legacy key preserved
+        p["amber_min"]    = amber
+        p["red_min"]      = red
+        p["scope_all"]    = False          # always evaluate "since last"; option removed from UI
+        p["threshold_min"] = amber         # legacy key preserved
 
-        # also_tables
-        raw_also = (self.also_tables_edit.text() or "").strip()
-        parts = re.split(r"[,\s;]+", raw_also)
-        also_tables = [t for t in (s.strip() for s in parts) if t]
-        p["also_tables"] = also_tables
+        # Also-tables
+        p["also_tables"] = self.also_tables_widget.checked_tables()
 
         # Recipients
-        raw = (self.recipients_edit.text() or "").strip()
-        parts = re.split(r"[,\s;]+", raw)
+        raw    = (self.recipients_edit.text() or "").strip()
+        parts  = re.split(r"[,\s;]+", raw)
         emails = [e for e in (s.strip() for s in parts) if e and "@" in e]
         self.spec.recipients = emails
         p["recipients"] = emails
 
-        # Scheduling / throttling / toggles
-        p["interval_min"] = int(self.interval_spin.value())
-        p["email_cooldown_min"] = int(self.cooldown_spin.value())
-
-        # NEW toggles
-        p["email_on_amber"] = bool(self.email_amber_cb.isChecked())
-        p["email_on_red"] = bool(self.email_red_cb.isChecked())
-
-        # Existing toggles
+        # Scheduling / throttle / toggles
+        p["interval_min"]        = int(self.interval_spin.value())
+        p["email_cooldown_min"]  = int(self.cooldown_spin.value())
+        p["email_on_amber"]      = bool(self.email_amber_cb.isChecked())
+        p["email_on_red"]        = bool(self.email_red_cb.isChecked())
         p["email_on_escalation"] = bool(self.escalation_cb.isChecked())
-        p["email_on_recovery"] = bool(self.recovery_cb.isChecked())
+        p["email_on_recovery"]   = bool(self.recovery_cb.isChecked())
 
         self.spec.payload = p
         super().accept()

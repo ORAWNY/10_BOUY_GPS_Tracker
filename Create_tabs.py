@@ -17,6 +17,8 @@ import uuid
 
 
 from utils.alerts.alerts_tab import AlertsTab
+from utils.alerts.evaluator import load_specs
+from utils.alerts.store import read_last_status
 from utils.chart_board import ChartBoard
 
 # Import alert sub-modules so their @register decorators run and REGISTRY is populated.
@@ -506,12 +508,11 @@ class TableTab(QWidget):
         charts_scroll, self.charts_board, self._charts_overlay = self._build_board_with_overlay()
         charts_v.addWidget(charts_scroll)
 
-        # Alerts
+        # Alerts engine (hidden — not added as a visible tab; managed via Summary page)
         self.alerts_tab = AlertsTab(self, self.db_path, logger=None)
 
         self.inner_tabs.addTab(overview_tab, "Project overview")
         self.inner_tabs.addTab(charts_tab, "Charts")
-        self.inner_tabs.addTab(self.alerts_tab, "Alerts")
 
         # Trailing “＋” tab
         self.plus_tab = QWidget(self)
@@ -1492,91 +1493,98 @@ class ProjectsView(QWidget):
             # ---- Alerts ----
             def list_alerts(self, table: str):
                 tab = self._tab(table)
-                if not tab: return []
-                at = getattr(tab, "alerts_tab", None)
-                if not at or not getattr(at, "specs", None):
+                if not tab:
                     return []
-                out = []
-                for s in at.specs:
-                    out.append({
+                try:
+                    specs = load_specs(tab.db_path, table)
+                except Exception:
+                    specs = []
+                return [
+                    {
                         "id": (s.id or s.name or s.kind),
                         "name": (s.name or s.kind or s.id or "Alert"),
                         "kind": s.kind,
-                    })
-                return out
+                    }
+                    for s in specs
+                ]
 
-            # ---- Alerts dropdown data (all alerts, with live status) ----
+            # ---- Alerts dropdown data (all alerts, with persisted status) ----
             def get_alerts_table(self, table: str):
                 """
                 Return a list of dicts for ALL alerts in a table:
                 {id, name, kind, status, summary, active}
+                Status is read from the persisted state DB (written by the evaluation timer).
                 """
                 tab = self._tab(table)
                 if not tab:
                     return []
-                at = getattr(tab, "alerts_tab", None)
-                if not at or not getattr(at, "specs", None):
-                    return []
+                try:
+                    specs = load_specs(tab.db_path, table)
+                except Exception:
+                    specs = []
 
                 out = []
-                for s in at.specs:
+                for s in specs:
+                    aid = s.id or s.name or s.kind
                     try:
-                        res = REGISTRY[s.kind].evaluate(s, tab)
-                        st = res.get("status")
-                        status_str = getattr(st, "value", str(st) if st is not None else "unknown")
-                        out.append({
-                            "id": s.id or s.name or s.kind,
-                            "name": s.name or s.kind or s.id or "Alert",
-                            "kind": s.kind,
-                            "status": status_str,
-                            "summary": res.get("summary", "") or "",
-                            "active": status_str not in ("GREEN", "OFF"),
-                        })
+                        raw = read_last_status(tab.db_path, table, str(aid))
+                        status_str = (raw or "unknown").upper()
                     except Exception:
-                        out.append({
-                            "id": s.id or s.name or s.kind,
-                            "name": s.name or s.kind or s.id or "Alert",
-                            "kind": s.kind,
-                            "status": "unknown",
-                            "summary": "",
-                            "active": False,
-                        })
+                        status_str = "unknown"
+                    out.append({
+                        "id": aid,
+                        "name": s.name or s.kind or aid or "Alert",
+                        "kind": s.kind,
+                        "status": status_str,
+                        "summary": "",
+                        "active": status_str not in ("GREEN", "OFF", "unknown"),
+                    })
                 return out
 
-            # ---- Open the same viewers as AlertsTab for a given alert id ----
+            # ---- Open viewers/editors for a given alert id ----
             def view_alert_by_id(self, table: str, alert_id: str):
                 tab = self._tab(table)
                 if not tab:
                     return
-                at = getattr(tab, "alerts_tab", None)
-                if not at:
+                try:
+                    specs = load_specs(tab.db_path, table)
+                except Exception:
                     return
-                spec = next((s for s in at.specs if s.id == alert_id or s.name == alert_id), None)
+                spec = next(
+                    (s for s in specs if s.id == alert_id or s.name == alert_id), None
+                )
                 if not spec:
                     return
-                # Use the same dialogs AlertsTab uses
-                if spec.kind == "Threshold":
-                    at._ThresholdViewDialog(spec, tab, at).exec()
-                elif spec.kind == "Distance":
-                    at._DistanceViewDialog(spec, tab, at).exec()
-                elif spec.kind == "Stale":
-                    at._StaleViewDialog(spec, tab, at).exec()
-                elif spec.kind == "MissingData":
-                    at._MissingDataViewDialog(spec, tab, at).exec()
-                else:
-                    QMessageBox.information(at, "View alert", f"No viewer available for type: {spec.kind}")
+                handler = REGISTRY.get(spec.kind)
+                if handler and hasattr(handler, "create_viewer"):
+                    try:
+                        dlg = handler.create_viewer(spec, tab, tab)
+                        if hasattr(dlg, "exec"):
+                            dlg.exec()
+                    except Exception:
+                        pass
 
             def configure_alert_by_id(self, table: str, alert_id: str):
                 tab = self._tab(table)
                 if not tab:
                     return
-                at = getattr(tab, "alerts_tab", None)
-                if not at:
+                try:
+                    specs = load_specs(tab.db_path, table)
+                except Exception:
                     return
-                spec = next((s for s in at.specs if s.id == alert_id or s.name == alert_id), None)
+                spec = next(
+                    (s for s in specs if s.id == alert_id or s.name == alert_id), None
+                )
                 if not spec:
                     return
-                at.configure_spec(spec)
+                handler = REGISTRY.get(spec.kind)
+                if handler and hasattr(handler, "create_editor"):
+                    try:
+                        dlg = handler.create_editor(spec, tab, tab)
+                        if hasattr(dlg, "exec"):
+                            dlg.exec()
+                    except Exception:
+                        pass
 
 
 
@@ -1586,28 +1594,26 @@ class ProjectsView(QWidget):
                 if not tab:
                     return {"status": "unknown", "observed": None, "summary": ""}
 
-                at = getattr(tab, "alerts_tab", None)
-                if not at or not getattr(at, "specs", None):
-                    return {"status": "unknown", "observed": None, "summary": ""}
+                try:
+                    specs = load_specs(tab.db_path, table)
+                except Exception:
+                    specs = []
 
                 # find alert spec by id (preferred) then by name/kind as a soft fallback
-                spec = next((s for s in at.specs if getattr(s, "id", None) == key), None)
+                spec = next((s for s in specs if getattr(s, "id", None) == key), None)
                 if spec is None:
-                    spec = next((s for s in at.specs if (s.name or s.kind or "") == key), None)
+                    spec = next((s for s in specs if (s.name or s.kind or "") == key), None)
                 if spec is None:
                     return {"status": "unknown", "observed": None, "summary": ""}
 
                 try:
-                    # Evaluate NOW against the current data in memory
-                    res = REGISTRY[spec.kind].evaluate(spec, tab)
-                    st = res.get("status")
-                    status_str = getattr(st, "value", str(st) if st is not None else "unknown")
+                    raw = read_last_status(tab.db_path, table, str(spec.id or spec.name or spec.kind))
+                    status_str = (raw or "unknown").upper()
                     return {
-                        "status": status_str,  # e.g. "GREEN" / "AMBER" / "RED" / "OFF"
-                        "observed": res.get("observed", None),
-                        "summary": res.get("summary", "") or "",
-                        # optional hint; SummaryTile doesn't rely on it but it's harmless to include
-                        "active": status_str not in ("GREEN", "OFF"),
+                        "status": status_str,
+                        "observed": None,
+                        "summary": "",
+                        "active": status_str not in ("GREEN", "OFF", "unknown"),
                     }
                 except Exception:
                     return {"status": "unknown", "observed": None, "summary": ""}
