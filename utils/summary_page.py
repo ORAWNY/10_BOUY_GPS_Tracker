@@ -127,11 +127,21 @@ def _status_color(level: str) -> QColor:
 # ------------------------- Columns -------------------------
 
 DEFAULT_COLS       = ["Project", "Since last", "Alerts", "Last DP"]
-ALL_AVAILABLE_COLS = ["Project", "Count", "Since last", "Alerts", "Last DP", "First DP"]
+ALL_AVAILABLE_COLS = ["Project", "Count", "Since last", "Alerts", "Battery", "Last DP", "First DP"]
 
 # Custom data roles
 ROLE_SINCE_LEVEL = int(Qt.ItemDataRole.UserRole) + 1
 ROLE_ALERTS      = int(Qt.ItemDataRole.UserRole) + 2  # list of (char, level, enabled)
+ROLE_BATTERY     = int(Qt.ItemDataRole.UserRole) + 3  # list of (value_str, level, enabled)
+
+# Column header icon prefixes (Unicode, consistent on Windows/Qt)
+_COL_ICONS = {
+    "Project":    "📁",
+    "Since last": "⏱",
+    "Battery":    "⚡",
+    "Last DP":    "❤",
+    "Alerts":     "🔔",
+}
 
 
 # ------------------------- Delegate (the important bit) -------------------------
@@ -236,6 +246,64 @@ class AlertsDelegate(QStyledItemDelegate):
         n = len(badges) if badges else 0
         w = max(40, n * (_BADGE_SIZE + _BADGE_GAP) + 8)
         h = max(super().sizeHint(option, index).height(), _BADGE_SIZE + 6)
+        from PyQt6.QtCore import QSize
+        return QSize(w, h)
+
+
+_BATT_H   = 20   # pill height
+_BATT_GAP = 4    # gap between pills
+_BATT_HPAD = 7   # horizontal text padding inside pill
+
+
+class BatteryDelegate(QStyledItemDelegate):
+    """
+    Paint the Battery column as a strip of coloured pill badges showing voltage values.
+
+    Each pill represents one Threshold-type alert for the table.
+    Colour = status level (green/amber/red/off/unknown).
+    Text   = latest value of the monitored column (e.g. "12.4V").
+    """
+
+    def paint(self, painter: QPainter, option, index):
+        badges = index.data(ROLE_BATTERY)
+        super().paint(painter, option, index)
+        if not badges:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        r = option.rect
+        x = r.left() + 4
+        cy = r.top() + r.height() // 2
+
+        fm = painter.fontMetrics()
+        for value_str, level, enabled in badges:
+            color = _status_color(level)
+            if not enabled:
+                color = QColor("#adb5bd")
+
+            text_w = fm.horizontalAdvance(str(value_str))
+            pill_w = text_w + _BATT_HPAD * 2
+            from PyQt6.QtCore import QRect as _QRect
+            pill_rect = _QRect(x, cy - _BATT_H // 2, pill_w, _BATT_H)
+
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(pill_rect, _BATT_H / 2, _BATT_H / 2)
+
+            painter.setPen(QPen(QColor("#ffffff")))
+            painter.drawText(pill_rect, int(Qt.AlignmentFlag.AlignCenter), str(value_str))
+
+            x += pill_w + _BATT_GAP
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        badges = index.data(ROLE_BATTERY)
+        n = len(badges) if badges else 0
+        w = max(50, n * (52 + _BATT_GAP) + 8)
+        h = max(super().sizeHint(option, index).height(), _BATT_H + 6)
         from PyQt6.QtCore import QSize
         return QSize(w, h)
 
@@ -649,7 +717,7 @@ class SummaryPage(QWidget):
         return stale_mod.build_spec_for_table(table, payload)
 
     def _on_cell_clicked(self, row: int, col: int):
-        headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
+        headers = self._header_names()
         if col < 0 or col >= len(headers):
             return
 
@@ -657,7 +725,7 @@ class SummaryPage(QWidget):
         if not table:
             return
 
-        if headers[col] == "Alerts":
+        if headers[col] in ("Alerts", "Battery"):
             self._open_alerts_dialog(table)
             return
 
@@ -731,9 +799,11 @@ class SummaryPage(QWidget):
         self._recompute_status_for_table_from_cache(table)
         self._render_from_cache()
 
-    def _table_name_from_row(self, row: int, headers: List[str]) -> Optional[str]:
+    def _table_name_from_row(self, row: int, headers: Optional[List[str]] = None) -> Optional[str]:
+        if headers is None:
+            headers = self._header_names()
         for c in range(self.table.columnCount()):
-            if headers[c] == "Project":
+            if c < len(headers) and headers[c] == "Project":
                 it = self.table.item(row, c)
                 if it:
                     return str(it.data(Qt.ItemDataRole.UserRole) or it.text())
@@ -1018,6 +1088,18 @@ class SummaryPage(QWidget):
             parts.append(f"⚪ {u}")
         self.badge_lbl.setText(f"Status: {'  '.join(parts) if parts else '—'}")
 
+    def _header_names(self) -> List[str]:
+        """Return logical column names (stored in UserRole, fallback to text)."""
+        result = []
+        for i in range(self.table.columnCount()):
+            hi = self.table.horizontalHeaderItem(i)
+            if hi is None:
+                result.append("")
+                continue
+            logical = hi.data(Qt.ItemDataRole.UserRole)
+            result.append(str(logical) if logical else hi.text())
+        return result
+
     def _apply_since_delegate(self, cols: List[str]):
         """
         Important: set the delegate AFTER columns exist (and after re-render),
@@ -1029,6 +1111,9 @@ class SummaryPage(QWidget):
         if "Alerts" in cols:
             alerts_col = cols.index("Alerts")
             self.table.setItemDelegateForColumn(alerts_col, AlertsDelegate(self.table))
+        if "Battery" in cols:
+            batt_col = cols.index("Battery")
+            self.table.setItemDelegateForColumn(batt_col, BatteryDelegate(self.table))
 
     def _render_from_cache(self):
         tables_live = set(_list_user_tables(self.db_path))
@@ -1049,11 +1134,15 @@ class SummaryPage(QWidget):
             "Count":      "Total number of rows in the table.",
             "Since last": "Time since the most recent datapoint  ·  average gap. Click to view chart and edit thresholds.",
             "Alerts":     "Alert status per type. Click to manage alerts for this table.",
+            "Battery":    "Latest voltage value for each Threshold-type alert. Click to manage alerts.",
             "Last DP":    "Timestamp of the most recent datapoint (from last Refresh).",
             "First DP":   "Timestamp of the earliest datapoint in the table.",
         }
         for i, name in enumerate(cols):
-            hi = QTableWidgetItem(name)
+            icon = _COL_ICONS.get(name, "")
+            display = f"{icon} {name}" if icon else name
+            hi = QTableWidgetItem(display)
+            hi.setData(Qt.ItemDataRole.UserRole, name)   # logical name for comparisons
             hi.setToolTip(tips.get(name, name))
             self.table.setHorizontalHeaderItem(i, hi)
 
@@ -1103,6 +1192,17 @@ class SummaryPage(QWidget):
                     it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured. Click to add.")
                     self.table.setItem(r, c, it)
 
+                elif colname == "Battery":
+                    batt_badges = self._load_battery_values(table_name)
+                    it = QTableWidgetItem("")
+                    it.setData(ROLE_BATTERY, batt_badges)
+                    tip_parts = [
+                        f"{val} ({'ON' if en else 'off'}, {lvl})"
+                        for val, lvl, en in batt_badges
+                    ]
+                    it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No Threshold alerts configured. Click to add.")
+                    self.table.setItem(r, c, it)
+
                 elif colname == "Last DP":
                     it = QTableWidgetItem(row.get("last_time_str", "—"))
                     it.setToolTip("Most recent datapoint timestamp.")
@@ -1127,7 +1227,7 @@ class SummaryPage(QWidget):
         if self.table.rowCount() <= 0:
             return
 
-        headers = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())]
+        headers = self._header_names()
         if "Since last" not in headers or "Project" not in headers:
             return
 
@@ -1198,16 +1298,69 @@ class SummaryPage(QWidget):
 
         return result
 
+    def _load_battery_values(self, table: str) -> List[tuple]:
+        """
+        Return [(value_str, level, enabled), ...] for all Threshold-type alerts for *table*.
+        Queries the latest value of each monitored column from the DB.
+        """
+        try:
+            specs = load_specs(self.db_path, table)
+        except Exception:
+            specs = []
+
+        threshold_specs = [s for s in specs if s.kind == "Threshold"]
+        if not threshold_specs:
+            return []
+
+        result = []
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                dt_col = _choose_dt_col(conn, table)
+                for spec in threshold_specs:
+                    enabled = bool(getattr(spec, "enabled", True))
+                    p = spec.payload or {}
+                    val_col = str(p.get("column", "") or "")
+
+                    value_str = "?"
+                    if val_col and dt_col:
+                        try:
+                            row = conn.execute(
+                                f'SELECT "{val_col}" FROM "{table}" '
+                                f'ORDER BY "{dt_col}" DESC LIMIT 1'
+                            ).fetchone()
+                            if row and row[0] is not None:
+                                try:
+                                    v = float(row[0])
+                                    value_str = f"{v:.1f}V"
+                                except Exception:
+                                    value_str = str(row[0])[:8]
+                        except Exception:
+                            pass
+
+                    if not enabled:
+                        level = "off"
+                    else:
+                        try:
+                            raw = read_last_status(self.db_path, table, str(spec.id))
+                        except Exception:
+                            raw = None
+                        level = _status_to_level(raw) if raw else "unknown"
+
+                    result.append((value_str, level, enabled))
+        except Exception:
+            pass
+
+        return result
+
     def _refresh_alerts_cell_for_table(self, table: str):
-        """Update just the Alerts cell for *table* after dialog closes (no full re-render)."""
-        headers = [
-            self.table.horizontalHeaderItem(i).text()
-            for i in range(self.table.columnCount())
-        ]
-        if "Alerts" not in headers or "Project" not in headers:
+        """Update the Alerts and Battery cells for *table* after dialog closes (no full re-render)."""
+        headers = self._header_names()
+        if "Project" not in headers:
             return
-        col_alerts = headers.index("Alerts")
         col_proj = headers.index("Project")
+        col_alerts = headers.index("Alerts") if "Alerts" in headers else -1
+        col_batt   = headers.index("Battery") if "Battery" in headers else -1
+
         for r in range(self.table.rowCount()):
             it_proj = self.table.item(r, col_proj)
             if not it_proj:
@@ -1215,17 +1368,27 @@ class SummaryPage(QWidget):
             row_table = str(it_proj.data(Qt.ItemDataRole.UserRole) or it_proj.text())
             if row_table != table:
                 continue
-            badges = self._load_alerts_status(table)
-            it = self.table.item(r, col_alerts)
-            if it is None:
-                it = QTableWidgetItem("")
-                self.table.setItem(r, col_alerts, it)
-            it.setData(ROLE_ALERTS, badges)
-            tip_parts = [
-                f"{ch}={'ON' if en else 'off'} ({lvl})"
-                for ch, lvl, en in badges
-            ]
-            it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured.")
+
+            if col_alerts >= 0:
+                badges = self._load_alerts_status(table)
+                it = self.table.item(r, col_alerts)
+                if it is None:
+                    it = QTableWidgetItem("")
+                    self.table.setItem(r, col_alerts, it)
+                it.setData(ROLE_ALERTS, badges)
+                tip_parts = [f"{ch}={'ON' if en else 'off'} ({lvl})" for ch, lvl, en in badges]
+                it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured.")
+
+            if col_batt >= 0:
+                batt_badges = self._load_battery_values(table)
+                it = self.table.item(r, col_batt)
+                if it is None:
+                    it = QTableWidgetItem("")
+                    self.table.setItem(r, col_batt, it)
+                it.setData(ROLE_BATTERY, batt_badges)
+                tip_parts = [f"{v} ({'ON' if en else 'off'}, {lvl})" for v, lvl, en in batt_badges]
+                it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No Threshold alerts configured.")
+
             break
         self.table.viewport().update()
 

@@ -93,3 +93,23 @@ QToolTip {
     padding: 6px 8px;
     border-radius: 6px;
 }
+
+/* Checkboxes & Radios */
+QCheckBox, QRadioButton { padding: 3px; color: #e5e7eb; }
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px; height: 16px;
+    border: 2px solid #4b5563;
+    border-radius: 3px;
+    background: #1f2937;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #38bdf8; background: #0c1a2e;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: #0ea5e9;
+    border: 2px solid #0284c7;
+    image: url(__CHECK_ICON__);
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: #374151; background: #111827;
+}

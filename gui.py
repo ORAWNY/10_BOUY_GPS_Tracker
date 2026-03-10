@@ -170,6 +170,10 @@ def apply_ui_theme(app: QApplication, theme: str, accent: str = "") -> tuple[str
         # Fail-safe: don't crash if file missing
         qss = ""
 
+    # Inject absolute path to the checkmark icon so url() works cross-platform
+    check_icon = _asset_path("icons", "check.svg").replace("\\", "/")
+    qss = qss.replace("__CHECK_ICON__", check_icon)
+
     app.setStyleSheet(qss)
     return theme, (accent or "")
 

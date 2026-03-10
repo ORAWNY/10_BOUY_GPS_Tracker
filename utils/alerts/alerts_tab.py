@@ -1044,6 +1044,18 @@ class AlertsTab(QWidget):
 
         if self._eval_running:
             return
+
+        # Reload specs from DB so changes made via TableAlertsDialog are picked up
+        # without requiring a restart. Safe to do every cycle (DB read is fast).
+        try:
+            from utils.alerts.evaluator import load_specs as _load_specs
+            fresh = _load_specs(self.db_path, self.host.table_name)
+            if fresh is not None:
+                self.specs = fresh
+                self.refresh_table()
+        except Exception:
+            pass
+
         self._eval_running = True
         try:
             if not any(s.enabled for s in self.specs):
