@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QColor, QBrush
 
 from utils.alerts import REGISTRY, AlertSpec, Status
+from utils.time_utils import fmt_duration as _fmt_duration
 from utils.alerts.store import (
     ensure_alerts_tables, write_settings_audit, read_last_status, write_last_status,
     read_flag, set_flag, count_flagged, read_last_email, write_last_email,
@@ -441,18 +442,6 @@ class AlertsTab(QWidget):
         Load recent history rows and render them nicely.
         For Stale alerts, show observed in human time (h/m/s) and threshold in minutes.
         """
-
-        def _fmt_duration(secs: float) -> str:
-            try:
-                secs = int(max(0, float(secs)))
-            except Exception:
-                return str(secs)
-            d, r = divmod(secs, 86400)
-            h, r = divmod(r, 3600)
-            m, s = divmod(r, 60)
-            if d: return f"{d}d {h:02d}h {m:02d}m {s:02d}s"
-            if h: return f"{h}h {m:02d}m {s:02d}s"
-            return f"{m}m {s:02d}s"
 
         rows: List[Tuple] = []
         try:

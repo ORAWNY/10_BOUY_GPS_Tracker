@@ -17,18 +17,7 @@ from PyQt6.QtWidgets import (
 
 from utils.alerts import register, AlertSpec, AlertHandler, EvalResult, Status, Host
 from utils.time_settings import local_zone, parse_series_to_local_naive
-
-
-def fmt_duration(secs: float) -> str:
-    secs = int(max(0, secs))
-    d, r = divmod(secs, 86400)
-    h, r = divmod(r, 3600)
-    m, s = divmod(r, 60)
-    if d:
-        return f"{d}d {h:02d}h {m:02d}m {s:02d}s"
-    if h:
-        return f"{h}h {m:02d}m {s:02d}s"
-    return f"{m}m {s:02d}s"
+from utils.time_utils import fmt_duration
 
 
 class _Editor(QDialog):

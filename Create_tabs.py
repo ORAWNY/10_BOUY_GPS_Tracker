@@ -19,16 +19,12 @@ import uuid
 from utils.alerts.alerts_tab import AlertsTab
 from utils.chart_board import ChartBoard
 
-# Ensure alert types self-register (side-effect imports)
+# Import alert sub-modules so their @register decorators run and REGISTRY is populated.
+# utils/alerts/__init__.py already does this, but an explicit import here ensures it
+# happens even if only Create_tabs is imported directly.
 from utils.alerts import distance_alert, threshold_alert, stale_alert, REGISTRY  # noqa: F401
 
-# Extra-safe explicit module imports (fixes: "Stale handler not registered. Import utils.alerts.stale_alert")
-import utils.alerts.distance_alert  # noqa: F401
-import utils.alerts.threshold_alert  # noqa: F401
-import utils.alerts.stale_alert  # noqa: F401
-
 from utils.time_settings import local_zone, offset_label, parse_series_to_local_naive
-from utils.time_settings import get_config
 
 
 
@@ -59,45 +55,13 @@ def _connect_db(db_path: str, *, ro: bool = False) -> sqlite3.Connection:
 
 
 
-# --- put near top of Create_tabs.py (after imports) ---
-def _make_legacy_board(db_path: str):
-    """Adapter with .tiles -> objects that expose .config().table"""
-    class _Cfg:
-        def __init__(self, table): self.table = table
-
-    class _Tile:
-        def __init__(self, table): self._table = table
-        def config(self): return _Cfg(self._table)
-
-    class _Board:
-        def __init__(self, tables): self.tiles = [ _Tile(t) for t in tables ]
-
-    return _Board(_list_user_tables(db_path))
-
-
 def _make_summary_page(parent, db_path: str, alerts_provider):
-    """
-    Try the new utils.summary_page.SummaryPage API first,
-    then the old API, and finally fall back to our local SummaryTab.
-    """
+    """Instantiate SummaryPage; fall back to the minimal SummaryTab on failure."""
     try:
-        from utils.summary_page import SummaryPage as SP
-        try:
-            # NEW API
-            return SP(db_path=db_path, alerts_provider=alerts_provider, parent=parent)
-        except TypeError:
-            # OLD API
-            from utils.time_settings import get_config
-            return SP(
-                get_config(),                # cfg
-                alerts_provider,             # alerts_provider
-                _make_legacy_board(db_path), # board
-                db_path,                     # db_path
-                parent                       # parent
-            )
+        from utils.summary_page import SummaryPage
+        return SummaryPage(db_path=db_path, alerts_provider=alerts_provider, parent=parent)
     except Exception as e:
-        # Anything goes wrong? Use our minimal, safe SummaryTab.
-        print(f"[SummaryPage] falling back to local SummaryTab: {e!r}")
+        print(f"[SummaryPage] falling back to SummaryTab: {e!r}")
         return SummaryTab(db_path)
 
 

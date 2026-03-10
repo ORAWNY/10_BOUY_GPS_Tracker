@@ -17,17 +17,22 @@ from typing import List, Callable, Optional, Dict, Any, Sequence, Tuple
 import requests
 import tempfile
 import shutil
-import base64
-import zlib
-import binascii
 
-
-try:
-    import win32com.client  # type: ignore
-except Exception:  # pragma: no cover
-    win32com = None  # graceful fallback if pywin32 is missing
 
 from utils.Email_parser.email_parser_ftp import FTPSession
+from utils.Email_parser.email_parser_payload import (
+    PAYLOAD_RE,
+    find_encoded_payload_line as _find_encoded_payload_line,
+    find_encoded_payload_candidates as _find_encoded_payload_candidates,
+    maybe_decode_compressed_payload as _maybe_decode_compressed_payload,
+)
+from utils.Email_parser.email_parser_outlook import (
+    get_sender_email as _get_sender_email,
+    resolve_mailbox,
+    resolve_folder_path,
+    list_outlook_folder_paths,
+    _resolve_child,
+)
 from utils.Email_parser.email_parser_timeshifter import (
     # generic shifting/parsing
     parse_shift_to_minutes,
@@ -62,177 +67,8 @@ from utils.Email_parser.email_parser_timeshifter import (
 
 DEFAULT_MAILBOX = "metocean configuration"
 
-# Payload lines may look like:
-#   [A1]#S,12475,L73,DataLogger,2509041445,11.92,27.39,27.4,26.69,0,3.56,**
-#   [A1]#D,12475,##,L73,DataLogger,K1,K1,F5,F5,2509041445,Battery,11.92,Tempat5m,27,DO,4,**
-PAYLOAD_RE = re.compile(r"^(?:\[[^\]]+\])?#([SD]),(.*)$")
-
 # Reserved columns always present in DB tables
 RESERVED_COLS = ("id", "subject", "sender", "received_time")
-
-# ------------ Compressed / encoded payload helpers ------------
-_DATA_LINE_RE = re.compile(r"(?im)^\s*Data\s*:\s*(.+?)\s*$")
-
-def _strip_quotes(s: str) -> str:
-    s = (s or "").strip()
-    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-        return s[1:-1].strip()
-    return s
-
-def _find_encoded_payload_line(body: str) -> Optional[str]:
-    """
-    Prefer a 'Data: <blob>' line if present; else fall back to the last non-empty line.
-    Returns the raw candidate string (not yet decoded).
-    """
-    if not body:
-        return None
-    m = _DATA_LINE_RE.search(body)
-    if m:
-        return _strip_quotes(m.group(1))
-    # fallback: last non-empty line
-    for line in reversed((body or "").splitlines()):
-        line = _strip_quotes(line.strip())
-        if line:
-            return line
-    return None
-
-def _find_encoded_payload_candidates(body: str) -> List[str]:
-    """
-    Return candidate encoded payload strings in order of preference.
-    Prefers lines *after* the 'Data:' header (the next non-empty, non-header lines),
-    then the inline content on the 'Data:' line, then finally the last non-empty line.
-    """
-    if not body:
-        return []
-    lines = body.splitlines()
-    candidates: List[str] = []
-
-    # locate "Data:" header line
-    for idx, raw in enumerate(lines):
-        m = _DATA_LINE_RE.match(raw)
-        if not m:
-            continue
-        inline = _strip_quotes(m.group(1)).strip()
-        # collect subsequent non-empty lines until the next header-like line (e.g., "IMEI:", "MOMSN:", etc.)
-        j = idx + 1
-        while j < len(lines):
-            nxt = _strip_quotes(lines[j].strip())
-            if not nxt:
-                j += 1
-                continue
-            # another header? stop
-            if re.match(r"^[A-Za-z][A-Za-z0-9 _-]*:\s", nxt):
-                break
-            candidates.append(nxt)   # e.g., the 'eJw...' or 'x\x9c...' line
-            j += 1
-        # consider inline value too (lower priority than the following lines)
-        if inline:
-            candidates.append(inline)
-        break  # only first Data: block
-
-    # fallback: last non-empty line in the whole body
-    if not candidates:
-        for line in reversed(lines):
-            s = _strip_quotes(line.strip())
-            if s:
-                candidates.append(s)
-                break
-
-    # Dedup but keep order
-    seen = set()
-    uniq: List[str] = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            uniq.append(c)
-    return uniq
-
-
-def _looks_base64(s: str) -> bool:
-    s = re.sub(r"\s+", "", s or "")
-    if not s:
-        return False
-    # If it's pure hex, treat it as NOT base64 (we'll try hex paths instead)
-    if re.fullmatch(r"[0-9A-Fa-f]+", s) is not None:
-        return False
-    # base64 alphabet and length multiple of 4
-    return re.fullmatch(r"[A-Za-z0-9+/=]+", s) is not None and (len(s) % 4 == 0)
-
-
-def _decode_python_escaped_bytes(s: str) -> Optional[bytes]:
-    """
-    Turn a string like:  x\\x9c%\\xc8;...  into the actual bytes b'x\\x9c%\\xc8;...'
-    We go through 'unicode_escape' → bytes.
-    """
-    try:
-        # first, turn backslash escapes into actual chars
-        unescaped = bytes(s, "utf-8").decode("unicode_escape")
-        # then map 1:1 codepoints to bytes
-        return unescaped.encode("latin1", errors="ignore")
-    except Exception:
-        return None
-
-def _maybe_decode_compressed_payload(s: str) -> Optional[str]:
-    """
-    Try to get plaintext '#D,...' or '#S,...' from the blob:
-      0) HEX that decodes to ASCII that looks like BASE64 -> base64 -> zlib
-      1) BASE64 -> zlib
-      2) Python-escaped bytes text ('x\\x9c..') -> zlib
-      3) HEX of the escaped representation -> unescape -> zlib
-    """
-    if not s:
-        return None
-    candidate = s.strip()
-
-    # Strategy 0: HEX -> (ASCII) that looks like BASE64 -> zlib
-    try:
-        if re.fullmatch(r"[0-9A-Fa-f]+", candidate):
-            b = bytes.fromhex(candidate)
-            ascii_text = b.decode("latin1", errors="ignore").strip()
-            if _looks_base64(ascii_text):
-                raw = base64.b64decode(ascii_text, validate=False)
-                out = zlib.decompress(raw).decode("utf-8", errors="replace")
-                if PAYLOAD_RE.search(out):
-                    return out.strip()
-    except Exception:
-        pass
-
-    # Strategy 1: Base64 → zlib
-    try:
-        if _looks_base64(candidate):
-            raw = base64.b64decode(candidate, validate=False)
-            out = zlib.decompress(raw).decode("utf-8", errors="replace")
-            if PAYLOAD_RE.search(out):
-                return out.strip()
-    except Exception:
-        pass
-
-    # Strategy 2: Python-escaped string with \x.. escapes
-    try:
-        if r"\x" in candidate or "\\x" in candidate:
-            raw2 = _decode_python_escaped_bytes(candidate)
-            if raw2:
-                out = zlib.decompress(raw2).decode("utf-8", errors="replace")
-                if PAYLOAD_RE.search(out):
-                    return out.strip()
-    except Exception:
-        pass
-
-    # Strategy 3: HEX of the escaped representation ("78 5c 9c ..." -> "x\\x9c...") -> zlib
-    try:
-        if re.fullmatch(r"[0-9A-Fa-f]+", candidate):
-            stage1 = bytes.fromhex(candidate)
-            stage1_text = stage1.decode("latin1", errors="ignore")
-            stage2 = _decode_python_escaped_bytes(stage1_text)
-            if stage2:
-                out = zlib.decompress(stage2).decode("utf-8", errors="replace")
-                if PAYLOAD_RE.search(out):
-                    return out.strip()
-    except Exception:
-        pass
-
-    return None
-
 
 # --------------------- Config ---------------------
 @dataclass
@@ -714,103 +550,6 @@ def _mark_processed_id(conn: sqlite3.Connection, folder_tag: str, entry_id: str)
         (folder_tag, entry_id),
     )
 
-
-
-def _get_sender_email(msg) -> str:
-    """Try hard to get the SMTP email. Falls back to SenderName if needed."""
-    try:
-        addr = getattr(msg, "SenderEmailAddress", "") or ""
-        if addr:
-            return addr.strip()
-    except Exception:
-        pass
-    try:
-        sender = getattr(msg, "Sender", None)
-        if sender:
-            ex_user = sender.GetExchangeUser()
-            if ex_user:
-                smtp = ex_user.PrimarySmtpAddress
-                if smtp:
-                    return smtp.strip()
-    except Exception:
-        pass
-    try:
-        nm = getattr(msg, "SenderName", "") or ""
-        return nm.strip()
-    except Exception:
-        return ""
-
-
-def _get_namespace():
-    if win32com is None:
-        raise RuntimeError("pywin32 is not available. Install 'pywin32' to use the Outlook parser.")
-    return win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-
-
-def resolve_mailbox(mailbox_name: str):
-    ns = _get_namespace()
-    last_err = None
-    for attempt in range(6):  # ~3 seconds total
-        try:
-            return ns.Folders.Item(mailbox_name)
-        except Exception as e:
-            last_err = e
-            time.sleep(0.5)
-    raise RuntimeError(f"Mailbox '{mailbox_name}' not found or busy:\n{last_err}")
-
-
-def _resolve_child(mailbox, parent, name: str):
-    """Case-insensitive and Inbox-safe resolution."""
-    target = (name or "").strip()
-    if not target:
-        return parent
-    try:
-        if target.lower() == "inbox":
-            return mailbox.GetDefaultFolder(6)
-    except Exception:
-        pass
-    try:
-        return parent.Folders[target]
-    except Exception:
-        try:
-            for i in range(1, parent.Folders.Count + 1):
-                f = parent.Folders.Item(i)
-                if f.Name.strip().lower() == target.lower():
-                    return f
-        except Exception:
-            pass
-        raise
-
-
-def resolve_folder_path(mailbox, path: List[str]):
-    f = mailbox
-    for seg in path:
-        f = _resolve_child(mailbox, f, seg)
-    return f
-
-
-def list_outlook_folder_paths(mailbox_name: str, max_depth: int = 6, max_count: int = 2000) -> List[List[str]]:
-    m = resolve_mailbox(mailbox_name)
-    paths: List[List[str]] = []
-
-    def walk(folder, prefix: List[str], depth: int):
-        if depth > max_depth:
-            return
-        try:
-            count = folder.Folders.Count
-        except Exception:
-            return
-        for i in range(1, count + 1):
-            child = folder.Folders.Item(i)
-            name = (child.Name or "").strip()
-            cur = prefix + [name]
-            paths.append(cur)
-            if len(paths) >= max_count:
-                return
-            walk(child, cur, depth + 1)
-
-    walk(m, [], 0)
-    return paths
 
 
 # --------------------- Lookup helpers --------------------
