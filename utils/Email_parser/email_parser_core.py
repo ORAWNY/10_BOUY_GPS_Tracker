@@ -137,6 +137,16 @@ class EmailParserConfig:
     use_timezone_shift: bool = False  # enable UTC→TZ conversion
     timezone_name: str = ""  # e.g. "Europe/London" / "America/New_York"
 
+    # --- EMAIL SOURCE ---
+    # "outlook" = win32com/MAPI (default, Windows-only)
+    # "imap"    = IMAP4 (cross-platform, works with shared mailboxes)
+    source_type: str = "outlook"
+    imap_host: str = ""       # e.g. "outlook.office365.com"
+    imap_port: int = 993
+    imap_use_ssl: bool = True
+    imap_username: str = ""   # usually the shared mailbox address
+    imap_password: str = ""   # account password or app-password
+
     # OUTPUT DESTINATIONS ---
     # Local vs FTP destinations: either or both may be enabled.
     use_local_output: bool = True
@@ -238,6 +248,15 @@ class EmailParserConfig:
 
             use_timezone_shift=bool(d.get("use_timezone_shift", False)),
             timezone_name=d.get("timezone_name", ""),
+
+            # --- OUTPUT DESTINATIONS ---
+            # --- EMAIL SOURCE ---
+            source_type=d.get("source_type", "outlook"),
+            imap_host=d.get("imap_host", ""),
+            imap_port=int(d.get("imap_port", 993)),
+            imap_use_ssl=bool(d.get("imap_use_ssl", True)),
+            imap_username=d.get("imap_username", ""),
+            imap_password=d.get("imap_password", ""),
 
             # --- OUTPUT DESTINATIONS ---
             use_local_output=bool(d.get("use_local_output", True)),
@@ -1237,10 +1256,27 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             else:
                 log(f"FTP connection check failed: {err}")
 
-    # Outlook mailbox handle if not webhook
+    # Email mailbox handle if not webhook — select backend based on source_type
+    _use_imap = (getattr(cfg, "source_type", "outlook") or "outlook").lower() == "imap"
     if not use_webhook:
-        mailbox = resolve_mailbox(cfg.mailbox)
-        _ = _get_namespace()  # ensure Outlook objects are created
+        if _use_imap:
+            from utils.Email_parser import email_parser_imap as _imap_mod
+            _imap_mod.configure(
+                host=cfg.imap_host,
+                port=cfg.imap_port,
+                use_ssl=cfg.imap_use_ssl,
+                username=cfg.imap_username,
+                password=cfg.imap_password,
+            )
+            mailbox = _imap_mod.resolve_mailbox(cfg.mailbox)
+            _resolve_folder_path = _imap_mod.resolve_folder_path
+            _get_sender_email_fn = _imap_mod.get_sender_email
+            log(f"IMAP backend: {cfg.imap_host} as {cfg.imap_username}")
+        else:
+            mailbox = resolve_mailbox(cfg.mailbox)
+            _ = _get_namespace()  # ensure Outlook COM objects are created
+            _resolve_folder_path = resolve_folder_path
+            _get_sender_email_fn = _get_sender_email
 
     # ---------- Resolve a SAFE state base (never inside the output directory) ----------
     def _abs(p: Optional[str]) -> str:
@@ -1370,7 +1406,7 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                     continue
             else:
                 try:
-                    folder = resolve_folder_path(mailbox, path)
+                    folder = _resolve_folder_path(mailbox, path)
                 except Exception as e:
                     # Log first for visibility
                     log(f"Folder not found: {cfg.mailbox} > " + " > ".join(path) + f" ({e})")
@@ -1435,7 +1471,7 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                     else:
                         subject = getattr(msg, "Subject", "") or ""
                         sender_name = getattr(msg, "SenderName", "") or ""
-                        sender_email = _get_sender_email(msg)
+                        sender_email = _get_sender_email_fn(msg)
                         entry_id = _get_entry_id(msg)
                         try:
                             received_time = msg.ReceivedTime.strftime("%Y-%m-%d %H:%M:%S")
