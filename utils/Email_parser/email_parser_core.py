@@ -27,6 +27,7 @@ from utils.Email_parser.email_parser_payload import (
     maybe_decode_compressed_payload as _maybe_decode_compressed_payload,
 )
 from utils.Email_parser.email_parser_outlook import (
+    _get_namespace,
     get_sender_email as _get_sender_email,
     resolve_mailbox,
     resolve_folder_path,
