@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 
 # Import from package so @register updates the shared REGISTRY
 from utils.charts import register, TypeHandlerBase, ChartSpec
+from utils.charts.base import apply_figure_theme, is_app_dark_mode
 
 
 class PieEditor(QDialog):
@@ -93,13 +94,22 @@ class PieRenderer(QWidget):
         self.ax = self.canvas.figure.add_subplot(111)
         self.refresh_data()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_has_been_shown', False):
+            self._has_been_shown = True
+            self.canvas.draw()
+
     def refresh_data(self):
         df = self.get_df()
         p = self.spec.payload
         self.ax.clear()
+        dark = is_app_dark_mode()
+        apply_figure_theme(self.canvas.figure, self.ax, dark=dark)
+        ph_color = "#94a3b8" if dark else "#9ca3af"
 
         if df is None or df.empty:
-            self.ax.text(0.5, 0.5, "No data", ha='center', va='center')
+            self.ax.text(0.5, 0.5, "No data", ha='center', va='center', color=ph_color)
             self.canvas.draw_idle(); return
 
         mode = p.get("mode", "none")
@@ -114,7 +124,7 @@ class PieRenderer(QWidget):
         if mode == "availability":
             col = p.get("value_col", "")
             if not col or col not in df.columns:
-                self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center')
+                self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center', color=ph_color)
                 self.canvas.draw_idle(); return
             vals = pd.to_numeric(df[col], errors="coerce")
             mask = vals.notna() & (vals != 9999) & (vals != -9999)
@@ -127,7 +137,7 @@ class PieRenderer(QWidget):
         elif mode in ("group_count", "group_sum", "group_mean"):
             grp = p.get("group_col", "")
             if not grp or grp not in df.columns:
-                self.ax.text(0.5, 0.5, "Pick a group column", ha='center', va='center')
+                self.ax.text(0.5, 0.5, "Pick a group column", ha='center', va='center', color=ph_color)
                 self.canvas.draw_idle(); return
 
             if mode == "group_count":
@@ -135,11 +145,11 @@ class PieRenderer(QWidget):
             else:
                 val = p.get("value_col", "")
                 if not val or val not in df.columns:
-                    self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center')
+                    self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center', color=ph_color)
                     self.canvas.draw_idle(); return
                 s = _safe_values(val)
                 if s.empty:
-                    self.ax.text(0.5, 0.5, "No numeric values", ha='center', va='center')
+                    self.ax.text(0.5, 0.5, "No numeric values", ha='center', va='center', color=ph_color)
                     self.canvas.draw_idle(); return
                 g = df.loc[s.index, grp]
                 if mode == "group_sum":
@@ -148,7 +158,7 @@ class PieRenderer(QWidget):
                     agg = s.groupby(g).mean()
 
             if len(agg) == 0:
-                self.ax.text(0.5, 0.5, "No groups to plot", ha='center', va='center')
+                self.ax.text(0.5, 0.5, "No groups to plot", ha='center', va='center', color=ph_color)
                 self.canvas.draw_idle(); return
 
             self.ax.pie(agg.values, labels=[str(x) for x in agg.index], autopct=autopct,
@@ -157,11 +167,11 @@ class PieRenderer(QWidget):
         else:
             col = p.get("value_col", "")
             if not col or col not in df.columns:
-                self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center')
+                self.ax.text(0.5, 0.5, "Pick a value column", ha='center', va='center', color=ph_color)
                 self.canvas.draw_idle(); return
             s = _safe_values(col)
             if s.empty:
-                self.ax.text(0.5, 0.5, "No numeric values", ha='center', va='center')
+                self.ax.text(0.5, 0.5, "No numeric values", ha='center', va='center', color=ph_color)
                 self.canvas.draw_idle(); return
             self.ax.pie(s.values, autopct=autopct, startangle=90,
                         counterclock=False, wedgeprops=wedgeprops, normalize=True)

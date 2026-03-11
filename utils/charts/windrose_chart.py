@@ -24,6 +24,7 @@ except Exception as _windrose_err:  # noqa: N816
 
 # IMPORTANT: import from the package so @register writes into the shared REGISTRY
 from utils.charts import register, TypeHandlerBase, ChartSpec
+from utils.charts.base import is_app_dark_mode
 
 
 # --------------------- Utilities / Defaults ---------------------
@@ -348,11 +349,18 @@ class WindRoseRenderer(QWidget):
         return d, v
 
     def refresh_data(self):
+        dark = is_app_dark_mode()
+        ph_color = "#94a3b8" if dark else "#9ca3af"
+        fig_bg   = "#111827" if dark else "#ffffff"
+        self.canvas.figure.set_facecolor(fig_bg)
+
         # Clear and draw an error message if windrose is missing
         if WindroseAxes is None:
             self.canvas.figure.clf()
             ax = self.canvas.figure.add_subplot(111)
-            ax.text(0.5, 0.5, "windrose package not installed", ha="center", va="center")
+            ax.set_facecolor(fig_bg)
+            ax.text(0.5, 0.5, "windrose package not installed",
+                    ha="center", va="center", color=ph_color)
             self.canvas.draw_idle()
             return
 
@@ -364,7 +372,9 @@ class WindRoseRenderer(QWidget):
 
         if df is None or df.empty or not p.get("series"):
             ax = self.canvas.figure.add_subplot(111)
-            ax.text(0.5, 0.5, "No data / configure chart…", ha="center", va="center")
+            ax.set_facecolor(fig_bg)
+            ax.text(0.5, 0.5, "No data / configure chart…",
+                    ha="center", va="center", color=ph_color)
             self.canvas.draw_idle()
             return
 
@@ -374,12 +384,25 @@ class WindRoseRenderer(QWidget):
         series = [s for s in p["series"] if s.get("dir_col") in df.columns and s.get("speed_col") in df.columns]
         if not series:
             ax = self.canvas.figure.add_subplot(111)
-            ax.text(0.5, 0.5, "Pick direction & speed columns", ha="center", va="center")
+            ax.set_facecolor(fig_bg)
+            ax.text(0.5, 0.5, "Pick direction & speed columns",
+                    ha="center", va="center", color=ph_color)
             self.canvas.draw_idle()
             return
 
         rows, cols = self._subplot_geometry(len(series))
         theme = {**_default_theme(), **(p.get("style") or {})}
+
+        # Auto-apply dark overrides when app is in dark mode and figure bg is default light
+        if dark and theme.get("facecolor", "#ffffff").strip().lower() in {"#ffffff", "white"}:
+            theme = {**theme,
+                     "facecolor": "#111827",
+                     "title_color": "#e5e7eb",
+                     "axis_label_color": "#94a3b8",
+                     "grid_color": "#334155",
+                     "spines_color": "#475569"}
+
+        self.canvas.figure.set_facecolor(theme.get("facecolor", fig_bg))
 
         # Figure title
         try:

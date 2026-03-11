@@ -10,8 +10,10 @@ import re
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRunnable, QThreadPool
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QTableWidget, QTableWidgetItem, QCheckBox, QSpinBox, QHeaderView
+    QTableWidget, QTableWidgetItem, QCheckBox, QSpinBox, QHeaderView,
+    QScrollArea, QFrame, QLineEdit, QMessageBox,
 )
+from utils.collapsible_section import CollapsibleSection
 
 from .email_parser_dialog import EmailParserDialog
 from .email_parser_core import EmailParserConfig as CoreConfig, run_parser as core_run_parser
@@ -376,127 +378,276 @@ class EmailParserManager(QObject):
 
 
 # =============================== Dock UI ===============================
+
+_PILL_SS = {
+    # idle: semi-transparent so it adapts to light and dark backgrounds
+    "idle":    "border-radius:8px; padding:1px 7px; font-size:10px; "
+               "background: rgba(128,128,128,0.18); border: 1px solid rgba(128,128,128,0.3);",
+    "running": "color:#ffffff; background:#2563eb; border-radius:8px; padding:1px 7px; font-size:10px;",
+    "ok":      "color:#ffffff; background:#16a34a; border-radius:8px; padding:1px 7px; font-size:10px;",
+    "error":   "color:#ffffff; background:#dc2626; border-radius:8px; padding:1px 7px; font-size:10px;",
+}
+
+_BTN_SS = (
+    "QPushButton { font-size: 11px; border: 1px solid rgba(128,128,128,0.4); border-radius: 5px; "
+    "  padding: 3px 10px; background: transparent; }"
+    "QPushButton:hover   { background: rgba(128,128,128,0.15); }"
+    "QPushButton:pressed { background: rgba(128,128,128,0.3); }"
+)
+_BTN_BLUE_SS = (
+    "QPushButton { font-size: 11px; border: none; border-radius: 5px; "
+    "  padding: 3px 10px; background: #2563eb; color: #ffffff; font-weight: 600; }"
+    "QPushButton:hover   { background: #1d4ed8; }"
+    "QPushButton:pressed { background: #1e40af; }"
+)
+_BTN_RED_SS = (
+    "QPushButton { font-size: 11px; border: 1px solid rgba(220,38,38,0.5); border-radius: 5px; "
+    "  padding: 3px 10px; background: transparent; color: #dc2626; }"
+    "QPushButton:hover   { background: rgba(220,38,38,0.1); }"
+    "QPushButton:pressed { background: rgba(220,38,38,0.2); }"
+)
+
+
+class _ParserCard(CollapsibleSection):
+    """One collapsible card per ManagedParser."""
+
+    def __init__(self, index: int, mp: ManagedParser, dock: "EmailParsersDock"):
+        super().__init__(mp.name, dock, collapsed=True)
+        self._index = index
+        self._mp = mp
+        self._dock = dock
+
+        # ── Status pill in header ────────────────────────────────────────────
+        self._status_pill = QLabel("idle")
+        self._status_pill.setStyleSheet(_PILL_SS["idle"])
+        self.add_header_widget(self._status_pill)
+
+        # ── Auto-run toggle (always visible in header) ───────────────────────
+        self._auto_chk = QCheckBox("Auto")
+        self._auto_chk.setChecked(mp.core.auto_run)
+        self._auto_chk.setToolTip("Run on the global timer interval")
+        self._auto_chk.toggled.connect(self._on_auto_toggled)
+        self.add_header_widget(self._auto_chk)
+
+        # ── Body ─────────────────────────────────────────────────────────────
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(10, 8, 10, 8)
+        body_lay.setSpacing(6)
+
+        # Info row
+        fmt  = (mp.core.output_format or "db").upper()
+        dest = mp.core.db_path if fmt == "DB" else (mp.core.output_dir or "—")
+        src  = "Webhook" if getattr(mp.core, "webhook_enabled", False) else (mp.core.mailbox or "Outlook")
+        info = QLabel(f"<b>Source:</b> {src}   <b>Format:</b> {fmt}   <b>Output:</b> {dest}")
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 11px; background: transparent;")
+        body_lay.addWidget(info)
+
+        # Refresh-tabs toggle
+        ref_row = QHBoxLayout()
+        self._ref_chk = QCheckBox("Refresh tabs after run")
+        self._ref_chk.setChecked(mp.refresh_tabs)
+        self._ref_chk.toggled.connect(self._on_ref_toggled)
+        ref_row.addWidget(self._ref_chk)
+        ref_row.addStretch(1)
+        body_lay.addLayout(ref_row)
+
+        # Rename
+        rename_row = QHBoxLayout()
+        rename_row.addWidget(QLabel("Name:"))
+        self._name_edit = QLineEdit(mp.name)
+        self._name_edit.setFixedHeight(26)
+        rename_row.addWidget(self._name_edit, 1)
+        btn_rename = QPushButton("Rename")
+        btn_rename.setFixedHeight(26)
+        btn_rename.setStyleSheet(_BTN_SS)
+        btn_rename.clicked.connect(self._on_rename)
+        rename_row.addWidget(btn_rename)
+        body_lay.addLayout(rename_row)
+
+        # Action buttons
+        act_row = QHBoxLayout()
+        act_row.setSpacing(6)
+        btn_run = QPushButton("▶  Run Now")
+        btn_run.setFixedHeight(28)
+        btn_run.setStyleSheet(_BTN_BLUE_SS)
+        btn_run.clicked.connect(self._on_run)
+        act_row.addWidget(btn_run)
+
+        btn_edit = QPushButton("⚙  Configure…")
+        btn_edit.setFixedHeight(28)
+        btn_edit.setStyleSheet(_BTN_SS)
+        btn_edit.clicked.connect(self._on_edit)
+        act_row.addWidget(btn_edit)
+
+        act_row.addStretch(1)
+
+        btn_remove = QPushButton("✕  Remove")
+        btn_remove.setFixedHeight(28)
+        btn_remove.setStyleSheet(_BTN_RED_SS)
+        btn_remove.clicked.connect(self._on_remove)
+        act_row.addWidget(btn_remove)
+        body_lay.addLayout(act_row)
+
+        self.set_body(body)
+
+    # ── Actions ──────────────────────────────────────────────────────────────
+
+    def set_status(self, state: str):
+        """state: 'idle' | 'running' | 'ok' | 'error'"""
+        labels = {"idle": "idle", "running": "running…", "ok": "✓ ok", "error": "✕ error"}
+        self._status_pill.setText(labels.get(state, state))
+        self._status_pill.setStyleSheet(_PILL_SS.get(state, _PILL_SS["idle"]))
+
+    def _on_auto_toggled(self, checked: bool):
+        self._dock.mgr.set_auto_update(self._index, checked)
+
+    def _on_ref_toggled(self, checked: bool):
+        self._dock.mgr.set_refresh_tabs(self._index, checked)
+
+    def _on_rename(self):
+        new_name = (self._name_edit.text() or "").strip()
+        if not new_name:
+            return
+        self._dock.mgr.rename_parser(self._index, new_name)
+        self.set_title(self._dock.mgr.parsers()[self._index].name)
+
+    def _on_run(self):
+        self.set_status("running")
+        self._dock.mgr.run_now(self._index, force_refresh=True)
+
+    def _on_edit(self):
+        self._dock._edit_one(self._index)
+
+    def _on_remove(self):
+        if QMessageBox.question(
+            self._dock, "Remove parser",
+            f"Remove parser '{self._mp.name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            mp = self._dock.mgr._parsers[self._index]
+            if mp.timer:
+                mp.timer.stop()
+                mp.timer.deleteLater()
+            self._dock.mgr._parsers.pop(self._index)
+            self._dock.mgr.log.emit(f"Removed parser '{mp.name}'")
+            self._dock.reload()
+
+
 class EmailParsersDock(QWidget):
     """
-    Dock ui:
-      - Global interval (numeric)
-      - Table: Name | Auto-update | Refresh tabs | Run | Edit
-      - Add / Remove / Run All Now
-      - Inline rename (edit the Name cell)
+    Dock UI: one collapsible card per parser.
+
+    Each card is collapsed by default to save space.
+    Expand a card to see its source, output, controls, and rename/remove options.
     """
 
     def __init__(self, mgr: EmailParserManager, parent=None):
         super().__init__(parent)
         self.mgr = mgr
+        self._cards: List[_ParserCard] = []
 
-        v = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
 
-        # Header with title + global interval
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Email/Webhook Parsers"))
-        hdr.addStretch(1)
-        hdr.addWidget(QLabel("Global interval (min):"))
+        # ── Top bar ──────────────────────────────────────────────────────────
+        top = QHBoxLayout()
+        top.setSpacing(8)
+
+        title = QLabel("Email / Webhook Parsers")
+        title.setStyleSheet("font-weight: 600; font-size: 12px;")
+        top.addWidget(title, 1)
+
+        top.addWidget(QLabel("Interval:"))
         self.spin_global = QSpinBox()
         self.spin_global.setRange(1, 10000)
         self.spin_global.setValue(self.mgr._global_interval_min)
+        self.spin_global.setSuffix(" min")
+        self.spin_global.setFixedWidth(80)
+        self.spin_global.setToolTip("Global auto-run interval (minutes)")
         self.spin_global.valueChanged.connect(self.mgr.set_global_interval)
-        hdr.addWidget(self.spin_global)
-        v.addLayout(hdr)
+        top.addWidget(self.spin_global)
 
-        # Table (5 columns)
-        self.table = QTableWidget(0, 5, self)
-        self.table.setHorizontalHeaderLabels(["Name", "Auto-update", "Refresh tabs", "Run", "Edit"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setShowGrid(True)
-        v.addWidget(self.table, 1)
-
-        # Buttons
-        btns = QHBoxLayout()
-        self.btn_add = QPushButton("Add…")
-        self.btn_remove = QPushButton("Remove Selected")
-        self.btn_run_all = QPushButton("Run All Now")
-        btns.addWidget(self.btn_add)
-        btns.addWidget(self.btn_remove)
-        btns.addStretch(1)
-        btns.addWidget(self.btn_run_all)
-        v.addLayout(btns)
-
-        # Events
-        self.btn_add.clicked.connect(self._add_clicked)
-        self.btn_remove.clicked.connect(self._remove_selected)
+        self.btn_run_all = QPushButton("▶▶ Run All")
+        self.btn_run_all.setFixedHeight(28)
+        self.btn_run_all.setStyleSheet(_BTN_BLUE_SS)
         self.btn_run_all.clicked.connect(self._run_all_clicked)
+        top.addWidget(self.btn_run_all)
 
-        # Inline rename
-        self.table.itemChanged.connect(self._maybe_name_changed)
+        self.btn_add = QPushButton("＋ Add")
+        self.btn_add.setFixedHeight(28)
+        self.btn_add.setStyleSheet(_BTN_SS)
+        self.btn_add.clicked.connect(self._add_clicked)
+        top.addWidget(self.btn_add)
 
-        # Initial fill
+        root.addLayout(top)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: rgba(128,128,128,0.3);")
+        root.addWidget(sep)
+
+        # ── Scrollable cards area ─────────────────────────────────────────────
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(self._scroll, 1)
+
+        self._cards_widget = QWidget()
+        self._cards_lay = QVBoxLayout(self._cards_widget)
+        self._cards_lay.setContentsMargins(0, 0, 0, 0)
+        self._cards_lay.setSpacing(4)
+        self._cards_lay.addStretch(1)
+        self._scroll.setWidget(self._cards_widget)
+
+        # ── Empty placeholder ─────────────────────────────────────────────────
+        self._empty_lbl = QLabel(
+            "No parsers configured.\n\nClick  ＋ Add  to set one up."
+        )
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setStyleSheet(
+            "color: #9ca3af; font-size: 12px; padding: 24px; background: transparent;"
+        )
+        self._cards_lay.insertWidget(0, self._empty_lbl)
+
+        # Connect log signal so we can update card status
+        self.mgr.log.connect(self._on_log)
+
         self.reload()
 
+    # ── Rebuild ───────────────────────────────────────────────────────────────
+
     def reload(self):
-        self.table.setRowCount(0)
-        for idx, mp in enumerate(self.mgr.parsers()):
-            self._append_row(idx, mp)
+        # Remove old cards (leave the stretch at the end)
+        for card in self._cards:
+            card.setParent(None)
+            card.deleteLater()
+        self._cards.clear()
 
-    def _append_row(self, index: int, mp: ManagedParser):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
+        parsers = self.mgr.parsers()
+        self._empty_lbl.setVisible(len(parsers) == 0)
 
-        # Name (editable)
-        item_name = QTableWidgetItem(mp.name)
-        self.table.setItem(row, 0, item_name)
+        for idx, mp in enumerate(parsers):
+            card = _ParserCard(idx, mp, self)
+            self._cards.append(card)
+            self._cards_lay.insertWidget(idx, card)
 
-        # Auto-update checkbox
-        chk_auto = QCheckBox()
-        chk_auto.setChecked(mp.core.auto_run)
-        chk_auto.toggled.connect(lambda checked, i=index: self.mgr.set_auto_update(i, checked))
-        self.table.setCellWidget(row, 1, chk_auto)
-
-        # Refresh tabs checkbox
-        chk_ref = QCheckBox()
-        chk_ref.setChecked(mp.refresh_tabs)
-        chk_ref.toggled.connect(lambda checked, i=index: self.mgr.set_refresh_tabs(i, checked))
-        self.table.setCellWidget(row, 2, chk_ref)
-
-        # Run Now button
-        btn_run = QPushButton("Run")
-        btn_run.clicked.connect(lambda _, i=index: self._run_one(i))
-        self.table.setCellWidget(row, 3, btn_run)
-
-        # Edit button
-        btn_edit = QPushButton("Edit…")
-        btn_edit.clicked.connect(lambda _, i=index: self._edit_one(i))
-        self.table.setCellWidget(row, 4, btn_edit)
-
-    def _maybe_name_changed(self, item: QTableWidgetItem):
-        if item.column() != 0:
-            return
-        row = item.row()
-        new_name = (item.text() or "").strip()
-        if not new_name:
-            if 0 <= row < len(self.mgr.parsers()):
-                item.setText(self.mgr.parsers()[row].name)
-            return
-        if 0 <= row < len(self.mgr.parsers()):
-            self.mgr.rename_parser(row, new_name)
-            item.setText(self.mgr.parsers()[row].name)
-
-    def _selected_index(self) -> Optional[int]:
-        rows = {r.row() for r in self.table.selectedIndexes()}
-        if not rows:
-            return 0 if self.table.rowCount() else None
-        return sorted(rows)[0]
-
-    # ----- Table row actions -----
-    def _run_one(self, index: int):
-        self.mgr.run_now(index, force_refresh=True)
+    # ── Actions ───────────────────────────────────────────────────────────────
 
     def _run_all_clicked(self):
+        for card in self._cards:
+            card.set_status("running")
         self.mgr.run_all_now()
+
+    def _add_clicked(self):
+        dlg = EmailParserDialog(self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            core_cfg = dlg.get_config()
+            name = EmailParserManager._derive_name(core_cfg)
+            self.mgr.add_parser(core_cfg, name=name)
+            self.reload()
 
     def _edit_one(self, index: int):
         if 0 <= index < len(self.mgr._parsers):
@@ -507,25 +658,15 @@ class EmailParsersDock(QWidget):
                 self.mgr.update_parser(index, new_core)
                 self.reload()
 
-    def _add_clicked(self):
-        dlg = EmailParserDialog(self)
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            core_cfg = dlg.get_config()
-            name = EmailParserManager._derive_name(core_cfg)
-            self.mgr.add_parser(core_cfg, name=name)
-            self.reload()
-
-    def _remove_selected(self):
-        rows = sorted({r.row() for r in self.table.selectedIndexes()}, reverse=True)
-        if not rows:
-            return
-        for row in rows:
-            idx = row
-            if 0 <= idx < len(self.mgr._parsers):
-                mp = self.mgr._parsers[idx]
-                if mp.timer:
-                    mp.timer.stop()
-                    mp.timer.deleteLater()
-                self.mgr._parsers.pop(idx)
-                self.mgr.log.emit(f"Removed parser '{mp.name}'")
-        self.reload()
+    def _on_log(self, msg: str):
+        """Update card status pill based on log messages."""
+        for card in self._cards:
+            name = card._mp.name
+            if f"[{name}]" not in msg:
+                continue
+            if "running parser" in msg.lower():
+                card.set_status("running")
+            elif "complete" in msg.lower():
+                card.set_status("ok")
+            elif "error" in msg.lower() or "failed" in msg.lower():
+                card.set_status("error")

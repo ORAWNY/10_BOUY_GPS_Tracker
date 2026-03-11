@@ -138,11 +138,52 @@ def _default_theme() -> Dict[str, Any]:
         "tick_size": 9,
         "date_format": "auto",
         "tight_layout": True,
-
         # default paddings
-        "x_pad_frac": 0.05,   # 10% of X range
-        "y_pad_frac": 0.05,   # 10% of Y range
+        "x_pad_frac": 0.05,
+        "y_pad_frac": 0.05,
     }
+
+
+def _dark_theme_overrides() -> Dict[str, Any]:
+    """Dark-mode matplotlib colours that replace the white defaults."""
+    return {
+        "facecolor":        "#111827",
+        "axes_facecolor":   "#1e293b",
+        "grid_color":       "#334155",
+        "grid_linestyle":   "--",
+        "grid_alpha":       1.0,
+        "spines_color":     "#475569",
+        "title_color":      "#e5e7eb",
+        "axis_label_color": "#94a3b8",
+    }
+
+
+# Light colours that indicate the theme has never been customised
+_LIGHT_FACECOLORS = {"#ffffff", "white", "#f8fafc", "#f9fafb", "#fafafa", "#f3f4f6"}
+
+
+def _is_app_dark_mode() -> bool:
+    """True when the user has chosen the dark theme in BuoyTools settings."""
+    try:
+        from PyQt6.QtCore import QSettings
+        s = QSettings("BuoyTools", "DBViewer")
+        return str(s.value("ui/theme", "light")).strip().lower() == "dark"
+    except Exception:
+        return False
+
+
+def _resolve_theme(raw_theme: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return a copy of *raw_theme* with dark-mode colours applied when:
+      - the app is in dark mode, AND
+      - the figure background is still a default light colour (not user-customised).
+    """
+    if not _is_app_dark_mode():
+        return raw_theme
+    fc = raw_theme.get("facecolor", "#ffffff").strip().lower()
+    if fc not in _LIGHT_FACECOLORS:
+        return raw_theme   # user has chosen a custom background — leave it alone
+    return {**raw_theme, **_dark_theme_overrides()}
 
 
 def _ensure_payload_defaults(spec: ChartSpec, columns: List[str]) -> None:
@@ -588,7 +629,7 @@ class XYRenderer(QWidget):
 
         # Canvas / axes
         self.canvas = FigureCanvas(Figure(figsize=(7.6, 3.8), tight_layout=True))
-        self.canvas.setMinimumHeight(240)
+        self.canvas.setMinimumHeight(120)
         self.ax_left = self.canvas.figure.add_subplot(111)
         self.ax_right = None
 
@@ -635,6 +676,12 @@ class XYRenderer(QWidget):
         self._cid_leave  = self.canvas.mpl_connect("figure_leave_event", self._on_leave)
 
         self.refresh_data()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_has_been_shown', False):
+            self._has_been_shown = True
+            self.canvas.draw()
 
     # --------- helpers ---------
     def _maybe_epoch_to_datetime(self, s: pd.Series) -> Optional[pd.Series]:
@@ -799,10 +846,10 @@ class XYRenderer(QWidget):
         if self.ax_right:
             self.ax_right.set_ylabel(p.get("y_right_label", ""), fontsize=label_sz, color=axis_color)
 
-        self.ax_left.tick_params(labelsize=tick_sz)
+        self.ax_left.tick_params(labelsize=tick_sz, colors=axis_color)
         self.ax_left.yaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
         if self.ax_right:
-            self.ax_right.tick_params(labelsize=tick_sz)
+            self.ax_right.tick_params(labelsize=tick_sz, colors=axis_color)
             self.ax_right.yaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
 
         # Date axis / numeric axis tick density
@@ -847,14 +894,21 @@ class XYRenderer(QWidget):
         self.ax_right = None
         self._series_data.clear()
 
+        _ph_color = "#94a3b8" if _is_app_dark_mode() else "#9ca3af"
+        _ph_bg    = "#111827"  if _is_app_dark_mode() else "#ffffff"
+        self.canvas.figure.set_facecolor(_ph_bg)
+        self.ax_left.set_facecolor(_ph_bg)
+
         if df is None or df.empty or not p.get("series"):
-            self.ax_left.text(0.5, 0.5, "No data / configure chart…", ha="center", va="center")
+            self.ax_left.text(0.5, 0.5, "No data / configure chart…",
+                              ha="center", va="center", color=_ph_color)
             self.canvas.draw_idle()
             return
 
         x_col = p.get("x_col")
         if not x_col or x_col not in df.columns:
-            self.ax_left.text(0.5, 0.5, "Pick X column", ha="center", va="center")
+            self.ax_left.text(0.5, 0.5, "Pick X column",
+                              ha="center", va="center", color=_ph_color)
             self.canvas.draw_idle()
             return
 
@@ -880,7 +934,8 @@ class XYRenderer(QWidget):
         d = d.sort_values(by=x_col, kind="mergesort", na_position="last").dropna(subset=[x_col])
         d = d[d[used_y].notna().any(axis=1)]
         if d.empty:
-            self.ax_left.text(0.5, 0.5, "No plottable rows", ha="center", va="center")
+            self.ax_left.text(0.5, 0.5, "No plottable rows",
+                              ha="center", va="center", color=_ph_color)
             self.canvas.draw_idle()
             return
 
@@ -945,8 +1000,8 @@ class XYRenderer(QWidget):
                 handles.append(handle)
                 labels.append(label)
 
-        # Theme & cosmetics
-        theme = {**_default_theme(), **(p.get("style") or {})}
+        # Theme & cosmetics — auto-switch to dark colours when app is in dark mode
+        theme = _resolve_theme({**_default_theme(), **(p.get("style") or {})})
         self._apply_theme(theme)
         legend_inside = self._apply_adaptive_rules(x_is_dt, theme, bool(p.get("legend", True)))
 

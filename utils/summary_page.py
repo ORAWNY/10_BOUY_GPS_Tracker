@@ -36,6 +36,7 @@ from utils.alerts import REGISTRY, AlertSpec
 from utils.alerts import summary_stale_alerts as stale_mod
 from utils.alerts.evaluator import load_specs
 from utils.alerts.store import ensure_alerts_tables, read_last_status
+from utils.constants import is_battery_column
 
 # Force registration of the Stale handler (ensures REGISTRY["Stale"] exists)
 try:
@@ -301,11 +302,16 @@ class BatteryDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         badges = index.data(ROLE_BATTERY)
-        n = len(badges) if badges else 0
-        w = max(50, n * (52 + _BATT_GAP) + 8)
-        h = max(super().sizeHint(option, index).height(), _BATT_H + 6)
         from PyQt6.QtCore import QSize
-        return QSize(w, h)
+        if not badges:
+            return QSize(50, super().sizeHint(option, index).height())
+        fm = option.fontMetrics
+        total_w = 8
+        for value_str, _level, _en in badges:
+            text_w = fm.horizontalAdvance(str(value_str))
+            total_w += text_w + _BATT_HPAD * 2 + _BATT_GAP
+        h = max(super().sizeHint(option, index).height(), _BATT_H + 6)
+        return QSize(max(50, total_w), h)
 
 
 # ------------------------- Config -------------------------
@@ -1271,6 +1277,22 @@ class SummaryPage(QWidget):
     # Maps AlertSpec kind → badge character
     _KIND_TO_CHAR = {"Stale": "S", "Threshold": "T", "MissingData": "M", "Distance": "D"}
 
+    @staticmethod
+    def _spec_is_battery(spec) -> bool:
+        """Return True if this alert spec should be treated as a battery alert.
+
+        An alert is considered a battery alert if:
+          - its payload has ``is_battery=True`` (manually set by the user), OR
+          - it is a Threshold alert whose monitored column name matches the
+            battery/voltage pattern defined in ``is_battery_column``.
+        """
+        if spec.kind != "Threshold":
+            return False
+        p = spec.payload or {}
+        if p.get("is_battery", False):
+            return True
+        return is_battery_column(str(p.get("column", "")))
+
     def _load_alerts_status(self, table: str) -> List[tuple]:
         """
         Return [(kind_char, level, enabled), ...] for all saved alert specs for *table*.
@@ -1283,6 +1305,9 @@ class SummaryPage(QWidget):
 
         result = []
         for spec in specs:
+            # Battery threshold alerts belong in the Battery column, not here
+            if self._spec_is_battery(spec):
+                continue
             kind_char = self._KIND_TO_CHAR.get(spec.kind, spec.kind[:1].upper())
             enabled = bool(getattr(spec, "enabled", True))
             if not enabled:
@@ -1300,33 +1325,48 @@ class SummaryPage(QWidget):
 
     def _load_battery_values(self, table: str) -> List[tuple]:
         """
-        Return [(value_str, level, enabled), ...] for all Threshold-type alerts for *table*.
-        Queries the latest value of each monitored column from the DB.
+        Return [(value_str, level, enabled), ...] for the Battery column.
+
+        Two sources are combined:
+
+        1. **Configured threshold alerts** that are battery-type (``_spec_is_battery``
+           returns True).  These show alert-evaluated levels (green/amber/red/off).
+
+        2. **Auto-discovered columns** — any column in the DB table whose name
+           matches the battery/voltage pattern (``is_battery_column``) but has no
+           threshold alert configured.  These show the latest raw value with a grey
+           "no alert" level so the user can still see the reading.
+
+        Pills from source 1 are listed first; source 2 appended after, sorted
+        alphabetically by column name to keep the display stable.
         """
         try:
             specs = load_specs(self.db_path, table)
         except Exception:
             specs = []
 
-        threshold_specs = [s for s in specs if s.kind == "Threshold"]
-        if not threshold_specs:
-            return []
+        battery_specs = [s for s in specs if self._spec_is_battery(s)]
+        # Columns already covered by a configured threshold alert
+        alerted_cols = {str(s.payload.get("column", "")) for s in battery_specs}
 
         result = []
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 dt_col = _choose_dt_col(conn, table)
-                for spec in threshold_specs:
+                order_expr = f'"{dt_col}"' if dt_col else "rowid"
+
+                # ── 1. Configured battery threshold alerts ─────────────────────
+                for spec in battery_specs:
                     enabled = bool(getattr(spec, "enabled", True))
                     p = spec.payload or {}
                     val_col = str(p.get("column", "") or "")
 
-                    value_str = "?"
-                    if val_col and dt_col:
+                    value_str = "N/A"
+                    if val_col:
                         try:
                             row = conn.execute(
                                 f'SELECT "{val_col}" FROM "{table}" '
-                                f'ORDER BY "{dt_col}" DESC LIMIT 1'
+                                f'ORDER BY {order_expr} DESC LIMIT 1'
                             ).fetchone()
                             if row and row[0] is not None:
                                 try:
@@ -1335,7 +1375,7 @@ class SummaryPage(QWidget):
                                 except Exception:
                                     value_str = str(row[0])[:8]
                         except Exception:
-                            pass
+                            value_str = "N/A"
 
                     if not enabled:
                         level = "off"
@@ -1347,6 +1387,35 @@ class SummaryPage(QWidget):
                         level = _status_to_level(raw) if raw else "unknown"
 
                     result.append((value_str, level, enabled))
+
+                # ── 2. Auto-discovered battery columns (no alert configured) ───
+                all_cols = _table_columns(conn, table)
+                auto_cols = sorted(
+                    c for c in all_cols
+                    if is_battery_column(c) and c not in alerted_cols
+                )
+                for col in auto_cols:
+                    try:
+                        row = conn.execute(
+                            f'SELECT "{col}" FROM "{table}" '
+                            f'ORDER BY {order_expr} DESC LIMIT 1'
+                        ).fetchone()
+                        if row and row[0] is not None:
+                            try:
+                                v = float(row[0])
+                                # Include the column name so the user can tell
+                                # Bat1 / Bat2 / Bat3 / Volt apart at a glance.
+                                value_str = f"{col}: {v:.1f}V"
+                            except Exception:
+                                value_str = f"{col}: {str(row[0])[:6]}"
+                        else:
+                            value_str = f"{col}: N/A"
+                    except Exception:
+                        value_str = f"{col}: N/A"
+
+                    # "unknown" renders as grey — no alert, just raw reading
+                    result.append((value_str, "unknown", True))
+
         except Exception:
             pass
 

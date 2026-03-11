@@ -48,6 +48,7 @@ from utils.alerts.store import (
     read_last_email,
     read_last_status,
 )
+from utils.constants import is_battery_column
 
 # ── Kind metadata ──────────────────────────────────────────────────────────────
 _KIND_META = {
@@ -64,6 +65,7 @@ _COLORS = {
     "RED":     "#e03131",
     "OFF":     "#94a3b8",
     "UNKNOWN": "#94a3b8",
+    "PENDING": "#3b82f6",
 }
 _PILL_TEXT = {
     "GREEN":   "OK",
@@ -71,6 +73,7 @@ _PILL_TEXT = {
     "RED":     "RED",
     "OFF":     "OFF",
     "UNKNOWN": "—",
+    "PENDING": "PENDING",
 }
 
 
@@ -95,13 +98,14 @@ def _status_pill_text(status: str, enabled: bool) -> str:
 
 
 # ── Custom item roles ──────────────────────────────────────────────────────────
-_ROLE_ID      = Qt.ItemDataRole.UserRole        # spec.id
-_ROLE_HEX     = Qt.ItemDataRole.UserRole + 10   # status colour hex string
-_ROLE_CHAR    = Qt.ItemDataRole.UserRole + 11   # kind badge letter
-_ROLE_NAME    = Qt.ItemDataRole.UserRole + 12   # display name
-_ROLE_KIND    = Qt.ItemDataRole.UserRole + 13   # kind label string
-_ROLE_STATLBL = Qt.ItemDataRole.UserRole + 14   # pill text
-_ROLE_ENABLED = Qt.ItemDataRole.UserRole + 15   # bool
+_ROLE_ID       = Qt.ItemDataRole.UserRole        # spec.id
+_ROLE_HEX      = Qt.ItemDataRole.UserRole + 10   # status colour hex string
+_ROLE_CHAR     = Qt.ItemDataRole.UserRole + 11   # kind badge letter
+_ROLE_NAME     = Qt.ItemDataRole.UserRole + 12   # display name
+_ROLE_KIND     = Qt.ItemDataRole.UserRole + 13   # kind label string
+_ROLE_STATLBL  = Qt.ItemDataRole.UserRole + 14   # pill text
+_ROLE_ENABLED  = Qt.ItemDataRole.UserRole + 15   # bool
+_ROLE_ISBATT   = Qt.ItemDataRole.UserRole + 16   # bool — is a battery threshold alert
 
 
 # ── Alert list delegate ────────────────────────────────────────────────────────
@@ -145,12 +149,15 @@ class _AlertDelegate(QStyledItemDelegate):
         painter.fillRect(r, bg)
 
         # Read custom roles
-        hex_   = str(index.data(_ROLE_HEX)     or "#94a3b8")
-        char_  = str(index.data(_ROLE_CHAR)    or "?")
-        name_  = str(index.data(_ROLE_NAME)    or "")
-        kind_  = str(index.data(_ROLE_KIND)    or "")
-        stat_  = str(index.data(_ROLE_STATLBL) or "—")
-        enab_  = bool(index.data(_ROLE_ENABLED))
+        hex_    = str(index.data(_ROLE_HEX)     or "#94a3b8")
+        char_   = str(index.data(_ROLE_CHAR)    or "?")
+        name_   = str(index.data(_ROLE_NAME)    or "")
+        kind_   = str(index.data(_ROLE_KIND)    or "")
+        stat_   = str(index.data(_ROLE_STATLBL) or "—")
+        enab_   = bool(index.data(_ROLE_ENABLED))
+        isbatt_ = bool(index.data(_ROLE_ISBATT))
+        if isbatt_:
+            kind_ = f"\u26a1 Battery  \u00b7  {kind_}"
 
         col = QColor(hex_)
 
@@ -325,9 +332,22 @@ class TableAlertsDialog(QDialog):
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
-        # Primary add button (inherits blue QPushButton style from global QSS)
-        self._add_btn = QPushButton("＋  Add Alert  ▾", self)
-        self._add_btn.setFixedHeight(32)
+        _icon_sz = 34
+
+        def _btn_ss(bg, bg_h, bg_p, fg, border, border_h):
+            return (
+                f"QPushButton {{ font-size: 15px; font-weight: 700; color: {fg}; "
+                f"border: 1.5px solid {border}; border-radius: 8px; "
+                f"background: {bg}; padding: 0px; }}"
+                f"QPushButton:hover   {{ background: {bg_h}; border-color: {border_h}; }}"
+                f"QPushButton:pressed {{ background: {bg_p}; }}"
+            )
+
+        # + Add  — blue
+        self._add_btn = QPushButton("\u002B", self)
+        self._add_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._add_btn.setToolTip("Add Alert")
+        self._add_btn.setStyleSheet(_btn_ss("#2563eb","#1d4ed8","#1e40af","#ffffff","#1d4ed8","#1e40af"))
         add_menu = QMenu(self._add_btn)
         for kind in _KIND_ORDER:
             if kind in REGISTRY:
@@ -337,26 +357,39 @@ class TableAlertsDialog(QDialog):
                 )
         self._add_btn.setMenu(add_menu)
 
-        # Secondary ghost buttons (flat=True triggers ghost style in global QSS)
-        self._cfg_btn     = QPushButton("Configure", self)
-        self._view_btn    = QPushButton("Inspect",   self)
-        self._enable_btn  = QPushButton("Enable",    self)
-        self._disable_btn = QPushButton("Disable",   self)
-        for btn in (self._cfg_btn, self._view_btn,
-                    self._enable_btn, self._disable_btn):
-            btn.setFlat(True)
-            btn.setFixedHeight(32)
+        # ⚙ Configure — slate
+        self._cfg_btn = QPushButton("\u2699", self)
+        self._cfg_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._cfg_btn.setFlat(True)
+        self._cfg_btn.setToolTip("Configure selected")
+        self._cfg_btn.setStyleSheet(_btn_ss("#475569","#334155","#1e293b","#ffffff","#334155","#1e293b"))
 
-        # Destructive remove button (inline red styling)
-        self._remove_btn = QPushButton("Remove", self)
-        self._remove_btn.setFixedHeight(32)
-        self._remove_btn.setStyleSheet(
-            "QPushButton { color: #e03131; border: 1px solid #fca5a5; "
-            "border-radius: 8px; padding: 4px 14px; background: transparent; "
-            "font-weight: 600; }"
-            "QPushButton:hover { background: #fee2e2; }"
-            "QPushButton:pressed { background: #fecaca; }"
-        )
+        # ◳ Inspect — purple
+        self._view_btn = QPushButton("\u25F3", self)
+        self._view_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._view_btn.setFlat(True)
+        self._view_btn.setToolTip("Inspect / chart")
+        self._view_btn.setStyleSheet(_btn_ss("#7c3aed","#6d28d9","#5b21b6","#ffffff","#6d28d9","#5b21b6"))
+
+        # ✓ Enable — green
+        self._enable_btn = QPushButton("\u2713", self)
+        self._enable_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._enable_btn.setFlat(True)
+        self._enable_btn.setToolTip("Enable selected")
+        self._enable_btn.setStyleSheet(_btn_ss("#16a34a","#15803d","#166534","#ffffff","#15803d","#166534"))
+
+        # ✕ Disable — amber
+        self._disable_btn = QPushButton("\u2715", self)
+        self._disable_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._disable_btn.setFlat(True)
+        self._disable_btn.setToolTip("Disable selected")
+        self._disable_btn.setStyleSheet(_btn_ss("#d97706","#b45309","#92400e","#ffffff","#b45309","#92400e"))
+
+        # − Remove — red
+        self._remove_btn = QPushButton("\u2212", self)
+        self._remove_btn.setFixedSize(_icon_sz, _icon_sz)
+        self._remove_btn.setToolTip("Remove selected")
+        self._remove_btn.setStyleSheet(_btn_ss("#dc2626","#b91c1c","#991b1b","#ffffff","#b91c1c","#991b1b"))
 
         self._remove_btn.clicked.connect(self._remove_selected)
         self._cfg_btn.clicked.connect(self._configure_selected)
@@ -506,12 +539,16 @@ class TableAlertsDialog(QDialog):
 
         for spec in self._specs:
             sym  = _kind_char(spec.kind)
-            last = read_last_status(
-                self.db_path, self.table_name, spec.id or spec.name
-            ) or "OFF"
+            _raw = read_last_status(self.db_path, self.table_name, spec.id or spec.name)
+            last = _raw or ("PENDING" if spec.enabled else "OFF")
             hex_  = _status_hex(last, spec.enabled)
             label = _status_pill_text(last, spec.enabled)
             name  = spec.name or spec.kind or "Alert"
+
+            p_tmp = spec.payload or {}
+            is_batt = (spec.kind == "Threshold") and (
+                bool(p_tmp.get("is_battery", False)) or is_battery_column(str(p_tmp.get("column", "")))
+            )
 
             item = QListWidgetItem()
             item.setData(_ROLE_ID,      spec.id)
@@ -521,6 +558,7 @@ class TableAlertsDialog(QDialog):
             item.setData(_ROLE_KIND,    _kind_label(spec.kind))
             item.setData(_ROLE_STATLBL, label)
             item.setData(_ROLE_ENABLED, spec.enabled)
+            item.setData(_ROLE_ISBATT,  is_batt)
             # Keep DisplayRole for accessibility / screen readers
             item.setText(f"{name} — {label}")
             self._list.addItem(item)
@@ -678,12 +716,18 @@ class TableAlertsDialog(QDialog):
         p    = spec.payload or {}
 
         self._det_title.setText(spec.name or spec.kind or "Alert")
-        self._det_kind.setText(_kind_label(spec.kind))
+        p_det = spec.payload or {}
+        is_batt = (spec.kind == "Threshold") and (
+            bool(p_det.get("is_battery", False)) or is_battery_column(str(p_det.get("column", "")))
+        )
+        kind_display = _kind_label(spec.kind)
+        if is_batt:
+            kind_display = f"\u26a1 Battery Threshold"
+        self._det_kind.setText(kind_display)
 
         # Status pill with colour
-        last = read_last_status(
-            self.db_path, self.table_name, spec.id or spec.name
-        ) or "OFF"
+        _raw = read_last_status(self.db_path, self.table_name, spec.id or spec.name)
+        last  = _raw or ("PENDING" if spec.enabled else "OFF")
         hex_  = _status_hex(last, spec.enabled)
         label = _status_pill_text(last, spec.enabled)
         c = QColor(hex_)

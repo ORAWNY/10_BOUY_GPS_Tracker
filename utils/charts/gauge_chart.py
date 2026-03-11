@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from utils.charts import register, TypeHandlerBase, ChartSpec
+from utils.charts.base import apply_figure_theme, is_app_dark_mode
 
 
 class GaugeEditor(QDialog):
@@ -93,6 +94,12 @@ class GaugeRenderer(QWidget):
         self.ax = self.canvas.figure.add_subplot(111)
         self.refresh_data()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_has_been_shown', False):
+            self._has_been_shown = True
+            self.canvas.draw()
+
     def _calc_value(self, df: pd.DataFrame, p: Dict[str, Any]) -> float:
         col = p.get("value_col", "")
         if not col or col not in df.columns:
@@ -124,14 +131,19 @@ class GaugeRenderer(QWidget):
         self.ax.clear()
         self.ax.set_aspect('equal')
         self.ax.axis('off')
+        dark = is_app_dark_mode()
+        apply_figure_theme(self.canvas.figure, self.ax, dark=dark)
+        ph_color   = "#94a3b8" if dark else "#9ca3af"
+        text_color = "#e5e7eb" if dark else "#111111"
+        track_color = "#334155" if dark else "#e0e0e0"
 
         if df is None or df.empty:
-            self.ax.text(0.5, 0.5, "No data", ha='center', va='center')
+            self.ax.text(0.5, 0.5, "No data", ha='center', va='center', color=ph_color)
             self.canvas.draw_idle(); return
 
         val = self._calc_value(df, p)
         if np.isnan(val):
-            self.ax.text(0.5, 0.5, "No value", ha='center', va='center')
+            self.ax.text(0.5, 0.5, "No value", ha='center', va='center', color=ph_color)
             self.canvas.draw_idle(); return
 
         vmin = float(p.get("min", 0.0))
@@ -141,16 +153,17 @@ class GaugeRenderer(QWidget):
         t = max(0.0, min(1.0, (val - vmin) / (vmax - vmin)))
 
         r, w = 1.0, 0.2
-        track = Wedge((0, 0), r, 180, 0, width=w, facecolor="#e0e0e0", edgecolor="none")
+        track = Wedge((0, 0), r, 180, 0, width=w, facecolor=track_color, edgecolor="none")
         arc = Wedge((0, 0), r, 180, 180 * (1 - t), width=w, facecolor="#4caf50", edgecolor="none")
         self.ax.add_patch(track); self.ax.add_patch(arc)
 
         units = p.get("units", "")
         disp = f"{val:.2f}{units}" if units else f"{val:.2f}"
-        self.ax.text(0, -0.05, disp, ha='center', va='center', fontsize=14, weight='bold')
+        self.ax.text(0, -0.05, disp, ha='center', va='center',
+                     fontsize=14, weight='bold', color=text_color)
         self.ax.set_xlim(-1.1, 1.1); self.ax.set_ylim(-0.1, 1.2)
 
-        self.ax.set_title(self.spec.title or "")
+        self.ax.set_title(self.spec.title or "", color=text_color)
         self.canvas.draw_idle()
 
 

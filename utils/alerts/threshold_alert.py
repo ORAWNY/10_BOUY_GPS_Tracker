@@ -8,6 +8,7 @@ import matplotlib.dates as mdates
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QDoubleSpinBox, QCheckBox, QVBoxLayout, QPushButton,
     QLabel, QLineEdit, QSpinBox, QHBoxLayout, QToolButton, QFileDialog,
@@ -16,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from utils.alerts import register, AlertSpec, AlertHandler, EvalResult, Status, Host
 from utils.time_settings import parse_series_to_local_naive
+from utils.constants import is_battery_column
 
 
 # --------------------------- Editor (unchanged) ---------------------------
@@ -68,12 +70,26 @@ class _Editor(QDialog):
         self.recovery_combo = QComboBox(); self.recovery_combo.addItems(["No", "Yes"])
         self.recovery_combo.setCurrentIndex(1 if p.get("email_on_recovery", False) else 0)
 
+        # Battery alert flag — auto-detected from column name, but user can override
+        _initial_batt = bool(p.get("is_battery", False)) or is_battery_column(p.get("column", ""))
+        self.is_battery_check = QCheckBox("Battery alert (voltage / charge monitoring)")
+        self.is_battery_check.setChecked(_initial_batt)
+        self.is_battery_check.setToolTip(
+            "Auto-ticked when the column name contains 'batt' or 'volt'. "
+            "Battery alerts appear in the Battery column; "
+            "unticked alerts appear in the Alerts column."
+        )
+        self.col.currentTextChanged.connect(
+            lambda col_name: self.is_battery_check.setChecked(is_battery_column(col_name))
+        )
+
         form.addRow("Column:", self.col)
         form.addRow("Mode:", self.mode)
         form.addRow("Red threshold:", self.red)
         form.addRow("Amber threshold:", self.amb)
         form.addRow("Green threshold:", self.grn)
         form.addRow("Scope:", self.scope)
+        form.addRow("Battery alert:", self.is_battery_check)
         form.addRow("Email recipients:", self.recipients_edit)
         form.addRow("Check interval (min):", self.interval_spin)
         form.addRow("Email cool-down (min):", self.cooldown_spin)
@@ -102,6 +118,7 @@ class _Editor(QDialog):
 
         p["column"] = self.col.currentText()
         p["mode"] = self.mode.currentText()
+        p["is_battery"] = self.is_battery_check.isChecked()
         p["red"] = float(self.red.value())
         p["amber"] = float(self.amb.value())
         p["green"] = float(self.grn.value())
@@ -186,6 +203,10 @@ class _ThresholdViewer(QDialog):
 
     # -------- utilities --------
     def _pick_time_col(self, df: pd.DataFrame) -> Optional[str]:
+        # Prefer the column the host already identified as the datetime column
+        host_col = getattr(self.host, "datetime_col", None)
+        if host_col and host_col in df.columns:
+            return host_col
         for c in ["__dt_iso", "timestamp", "time", "datetime", "date", "DateTime"]:
             if c in df.columns:
                 return c
@@ -311,56 +332,85 @@ class _ThresholdViewer(QDialog):
 
     def _rebuild(self):
         self.ax.clear()
+        self.fig.patch.set_facecolor("#ffffff")
+        self.ax.set_facecolor("#ffffff")
 
         d, tcol, vcol, share = self._current_windowed()
         if d.empty:
-            self.ax.text(0.5, 0.5, "No plottable data", ha="center", va="center")
+            self.ax.text(0.5, 0.5, "No data available for the selected range.",
+                         ha="center", va="center", transform=self.ax.transAxes,
+                         color="#9ca3af", fontsize=11)
             self.canvas.draw_idle()
             self.table.setRowCount(0)
             self.pct_label.setText(" ")
             return
 
-        # Line
-        self.ax.plot(d[tcol], d[vcol], linewidth=2)
-
-        # Threshold lines + shaded bands
         mode = str(self.spec.payload.get("mode", "greater"))
-        r = float(self.spec.payload.get("red", 0.0))
-        a = float(self.spec.payload.get("amber", 0.0))
-        g = float(self.spec.payload.get("green", 0.0))
-        self.ax.axhline(r, color="#f03e3e", linestyle="--", linewidth=1, label=f"RED {r:g}")
-        self.ax.axhline(a, color="#f59f00", linestyle="--", linewidth=1, label=f"AMBER {a:g}")
-        self.ax.axhline(g, color="#37b24d", linestyle="--", linewidth=1, label=f"GREEN {g:g}")
+        r    = float(self.spec.payload.get("red",   0.0))
+        a    = float(self.spec.payload.get("amber", 0.0))
 
         y_min = float(d[vcol].min())
         y_max = float(d[vcol].max())
-        pad = (y_max - y_min) * 0.08 if y_max != y_min else max(1.0, abs(y_max)) * 0.08
+        pad   = (y_max - y_min) * 0.12 if y_max != y_min else max(1.0, abs(y_max)) * 0.12
         y_lo, y_hi = y_min - pad, y_max + pad
-        if mode == "greater":
-            self.ax.axhspan(a, r, facecolor="#f59f00", alpha=0.15, linewidth=0)
-            self.ax.axhspan(r, y_hi, facecolor="#f03e3e", alpha=0.15, linewidth=0)
-        else:
-            self.ax.axhspan(y_lo, r, facecolor="#f03e3e", alpha=0.15, linewidth=0)
-            self.ax.axhspan(r, a, facecolor="#f59f00", alpha=0.15, linewidth=0)
 
-        # Cosmetics
-        self.ax.set_title(self.spec.name or "Threshold preview")
-        self.ax.set_xlabel("Time (local)")
-        self.ax.set_ylabel(vcol)
+        # ── Coloured status bands (drawn first, behind everything) ──────────
+        if mode == "greater":
+            self.ax.axhspan(y_lo,          min(a, y_hi),  facecolor="#dcfce7", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(a, y_hi),  min(r, y_hi),  facecolor="#fef9c3", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(r, y_hi),  y_hi,          facecolor="#fee2e2", alpha=0.55, linewidth=0, zorder=0)
+        else:
+            self.ax.axhspan(y_lo,          min(r, y_hi),  facecolor="#fee2e2", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(r, y_hi),  min(a, y_hi),  facecolor="#fef9c3", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(a, y_hi),  y_hi,          facecolor="#dcfce7", alpha=0.55, linewidth=0, zorder=0)
+
+        # ── Threshold lines ──────────────────────────────────────────────────
+        self.ax.axhline(r, color="#ef4444", linestyle="--", linewidth=1.2, alpha=0.9, zorder=2, label=f"RED  {r:g}")
+        self.ax.axhline(a, color="#f59f00", linestyle="--", linewidth=1.2, alpha=0.9, zorder=2, label=f"AMBER  {a:g}")
+
+        # ── Data line ────────────────────────────────────────────────────────
+        self.ax.plot(d[tcol], d[vcol], linewidth=2, color="#2563eb",
+                     zorder=3, solid_capstyle="round", solid_joinstyle="round")
+
+        # ── Axes limits & styling ────────────────────────────────────────────
+        self.ax.set_ylim(y_lo, y_hi)
+        for sp in ["top", "right"]:
+            self.ax.spines[sp].set_visible(False)
+        self.ax.spines["left"].set_color("#d1d5db")
+        self.ax.spines["bottom"].set_color("#d1d5db")
+        self.ax.set_axisbelow(True)
+        self.ax.yaxis.grid(True, linestyle="--", color="#e5e7eb", linewidth=0.8)
+        self.ax.xaxis.grid(False)
+        self.ax.tick_params(colors="#6b7280", labelsize=9)
+        self.ax.set_ylabel(vcol, color="#374151", fontsize=10, labelpad=8)
+        self.ax.set_xlabel("Time (local)", color="#374151", fontsize=10, labelpad=6)
+        self.ax.set_title(self.spec.name or "Threshold preview",
+                          color="#111827", fontsize=12, fontweight="bold", pad=10)
+
         locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
         self.ax.xaxis.set_major_locator(locator)
         try:
             self.ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         except Exception:
             pass
-        self.ax.grid(True, linestyle="-", color="#e5e7eb", alpha=1.0)
-        self.ax.legend(loc="best", fontsize=8)
+
+        self.ax.legend(loc="best", fontsize=8, framealpha=0.92,
+                       edgecolor="#e5e7eb", facecolor="#ffffff")
+        self.fig.tight_layout(pad=1.4)
         self.canvas.draw_idle()
 
-        # Percent readout
+        # ── Percent readout ──────────────────────────────────────────────────
+        g_pct = share["GREEN"]
+        a_pct = share["AMBER"]
+        r_pct = share["RED"]
         self.pct_label.setText(
-            f"Green {share['GREEN']:.1f}%   •   Amber {share['AMBER']:.1f}%   •   Red {share['RED']:.1f}%"
+            f"<span style='color:#16a34a'>● {g_pct:.1f}% OK</span>"
+            f"&nbsp;&nbsp;•&nbsp;&nbsp;"
+            f"<span style='color:#d97706'>● {a_pct:.1f}% AMBER</span>"
+            f"&nbsp;&nbsp;•&nbsp;&nbsp;"
+            f"<span style='color:#dc2626'>● {r_pct:.1f}% RED</span>"
         )
+        self.pct_label.setTextFormat(Qt.TextFormat.RichText)
 
         # Table (with status)
         self.table.setRowCount(0)
@@ -400,6 +450,7 @@ class ThresholdHandler(AlertHandler):
                 "amber": 80.0,
                 "green": 0.0,
                 "scope": "most_recent",
+                "is_battery": False,
                 # email / scheduling
                 "interval_min": 15,
                 "email_cooldown_min": 240,

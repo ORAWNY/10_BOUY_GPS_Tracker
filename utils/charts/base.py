@@ -6,6 +6,31 @@ from dataclasses import dataclass, field
 import pandas as pd
 from PyQt6.QtWidgets import QWidget, QDialog
 
+
+def is_app_dark_mode() -> bool:
+    """True when the user has chosen the dark theme in BuoyTools settings."""
+    try:
+        from PyQt6.QtCore import QSettings
+        s = QSettings("BuoyTools", "DBViewer")
+        return str(s.value("ui/theme", "light")).strip().lower() == "dark"
+    except Exception:
+        return False
+
+
+def apply_figure_theme(figure, ax=None, dark: bool | None = None) -> None:
+    """
+    Apply appropriate background colours to a matplotlib Figure and optional Axes.
+    If *dark* is None the current app theme is detected automatically.
+    """
+    if dark is None:
+        dark = is_app_dark_mode()
+    bg = "#111827" if dark else "#ffffff"
+    ax_bg = "#1e293b" if dark else "#ffffff"
+    figure.set_facecolor(bg)
+    figure.patch.set_facecolor(bg)
+    if ax is not None:
+        ax.set_facecolor(ax_bg)
+
 # ---------------- ChartSpec ----------------
 @dataclass
 class ChartSpec:

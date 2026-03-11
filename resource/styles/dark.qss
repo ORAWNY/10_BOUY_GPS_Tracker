@@ -113,3 +113,39 @@ QCheckBox::indicator:checked, QRadioButton::indicator:checked {
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
     border-color: #374151; background: #111827;
 }
+
+/* ─── CollapsibleSection ──────────────────────────────────────────────── */
+QFrame#cs_hdr {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+}
+QFrame#cs_hdr:hover { background: #273548; }
+QFrame#cs_body {
+    background: #111827;
+    border: 1px solid #334155;
+    border-top: none;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+/* ─── ChartBoard ──────────────────────────────────────────────────────── */
+QFrame#chart_board_bar {
+    background: #111827;
+    border-bottom: 1px solid #334155;
+}
+QFrame#chart_card {
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 8px;
+}
+QFrame#card_hdr {
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+}
+QSplitter#chart_vsplit::handle { background: #334155; }
+QSplitter#chart_vsplit::handle:hover { background: #64748b; }
+QSplitter#chart_row::handle { background: #334155; border-radius: 3px; }
+QSplitter#chart_row::handle:hover { background: #64748b; }

@@ -405,6 +405,8 @@ class StaleViewDialog(QDialog):
 
     def _rebuild(self):
         self.ax.clear()
+        self.fig.patch.set_facecolor("#ffffff")
+        self.ax.set_facecolor("#ffffff")
 
         amber, red, scope_all = self._thresholds()
         self.th_label.setText(f"AMBER ≥ {amber} min   •   RED ≥ {red} min")
@@ -412,14 +414,55 @@ class StaleViewDialog(QDialog):
 
         d = self._build_gaps()
         if d.empty:
-            self.ax.text(0.5, 0.5, "No plottable data", ha="center", va="center")
+            self.ax.text(0.5, 0.5, "No data available for the selected range.",
+                         ha="center", va="center", transform=self.ax.transAxes,
+                         color="#9ca3af", fontsize=11)
             self.canvas.draw_idle()
             self.table.setRowCount(0)
             return
 
-        self.ax.plot(d["t_end"], d["gap_min"], linewidth=2)
-        self.ax.axhline(amber, color="#f59f00", linestyle="--", linewidth=1, label=f"AMBER {amber}m")
-        self.ax.axhline(red, color="#f03e3e", linestyle="--", linewidth=1, label=f"RED {red}m")
+        gap_max = float(d["gap_min"].max())
+        y_hi = max(gap_max * 1.15, red * 1.2, 1.0)
+
+        # ── Coloured status bands ────────────────────────────────────────────
+        self.ax.axhspan(0,              min(amber, y_hi), facecolor="#dcfce7", alpha=0.55, linewidth=0, zorder=0)
+        self.ax.axhspan(min(amber,y_hi),min(red,   y_hi), facecolor="#fef9c3", alpha=0.55, linewidth=0, zorder=0)
+        self.ax.axhspan(min(red,  y_hi),y_hi,             facecolor="#fee2e2", alpha=0.55, linewidth=0, zorder=0)
+
+        # ── Threshold lines ──────────────────────────────────────────────────
+        self.ax.axhline(amber, color="#f59f00", linestyle="--", linewidth=1.2,
+                        alpha=0.9, zorder=2, label=f"AMBER  {amber} min")
+        self.ax.axhline(red,   color="#ef4444", linestyle="--", linewidth=1.2,
+                        alpha=0.9, zorder=2, label=f"RED  {red} min")
+
+        # ── Gap line, coloured by status ─────────────────────────────────────
+        _STATUS_COLOR = {"GREEN": "#16a34a", "AMBER": "#d97706", "RED": "#dc2626"}
+        xs = d["t_end"].values
+        ys = d["gap_min"].values
+        statuses = d["status"].values
+        for i in range(len(xs) - 1):
+            col = _STATUS_COLOR.get(str(statuses[i]), "#2563eb")
+            self.ax.plot(xs[i:i+2], ys[i:i+2], linewidth=2.2, color=col,
+                         solid_capstyle="round", zorder=3)
+        # Last point (no next segment) — draw a dot
+        if len(xs):
+            col = _STATUS_COLOR.get(str(statuses[-1]), "#2563eb")
+            self.ax.plot(xs[-1], ys[-1], "o", color=col, markersize=5, zorder=4)
+
+        # ── Axes styling ─────────────────────────────────────────────────────
+        self.ax.set_ylim(0, y_hi)
+        for sp in ["top", "right"]:
+            self.ax.spines[sp].set_visible(False)
+        self.ax.spines["left"].set_color("#d1d5db")
+        self.ax.spines["bottom"].set_color("#d1d5db")
+        self.ax.set_axisbelow(True)
+        self.ax.yaxis.grid(True, linestyle="--", color="#e5e7eb", linewidth=0.8)
+        self.ax.xaxis.grid(False)
+        self.ax.tick_params(colors="#6b7280", labelsize=9)
+        self.ax.set_ylabel("Gap (minutes)", color="#374151", fontsize=10, labelpad=8)
+        self.ax.set_xlabel("Time (local)",  color="#374151", fontsize=10, labelpad=6)
+        self.ax.set_title(self.spec.name or "Stale preview",
+                          color="#111827", fontsize=12, fontweight="bold", pad=10)
 
         locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
         self.ax.xaxis.set_major_locator(locator)
@@ -428,11 +471,9 @@ class StaleViewDialog(QDialog):
         except Exception:
             pass
 
-        self.ax.set_title(self.spec.name or "Stale preview")
-        self.ax.set_xlabel("End time (local)")
-        self.ax.set_ylabel("Gap (minutes)")
-        self.ax.grid(True, linestyle="-", color="#e5e7eb", alpha=1.0)
-        self.ax.legend(loc="best", fontsize=8)
+        self.ax.legend(loc="best", fontsize=8, framealpha=0.92,
+                       edgecolor="#e5e7eb", facecolor="#ffffff")
+        self.fig.tight_layout(pad=1.4)
         self.canvas.draw_idle()
 
         self.table.setRowCount(0)
