@@ -31,6 +31,44 @@ def apply_figure_theme(figure, ax=None, dark: bool | None = None) -> None:
     if ax is not None:
         ax.set_facecolor(ax_bg)
 
+
+def alert_chart_colors(dark: bool | None = None) -> dict:
+    """
+    Return a dict of colours for alert viewer charts (threshold/stale/distance).
+    Callers use: ``c = alert_chart_colors(); ax.set_facecolor(c["ax_bg"])`` etc.
+    """
+    if dark is None:
+        dark = is_app_dark_mode()
+    if dark:
+        return {
+            "fig_bg":      "#111827",
+            "ax_bg":       "#1e293b",
+            "spine":       "#374151",
+            "grid":        "#374151",
+            "tick":        "#9ca3af",
+            "label":       "#d1d5db",
+            "title":       "#f9fafb",
+            "legend_bg":   "#1e293b",
+            "legend_edge": "#374151",
+            "band_green":  "#14532d",
+            "band_amber":  "#713f12",
+            "band_red":    "#7f1d1d",
+        }
+    return {
+        "fig_bg":      "#ffffff",
+        "ax_bg":       "#ffffff",
+        "spine":       "#d1d5db",
+        "grid":        "#e5e7eb",
+        "tick":        "#6b7280",
+        "label":       "#374151",
+        "title":       "#111827",
+        "legend_bg":   "#ffffff",
+        "legend_edge": "#e5e7eb",
+        "band_green":  "#dcfce7",
+        "band_amber":  "#fef9c3",
+        "band_red":    "#fee2e2",
+    }
+
 # ---------------- ChartSpec ----------------
 @dataclass
 class ChartSpec:

@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QAbstractItemView, QMessageBox, QInputDialog, QCheckBox,
     QFileDialog, QApplication, QDialog, QComboBox
 )
-from PyQt6.QtGui import QColor, QBrush
+from PyQt6.QtGui import QColor, QBrush, QPalette
 
 from utils.alerts import REGISTRY, AlertSpec, Status
 from utils.time_utils import fmt_duration as _fmt_duration
@@ -56,6 +56,67 @@ def _generate_alert_chart(host, spec) -> Optional[str]:
         if df is None or df.empty or not tcol or tcol not in df.columns:
             return None
 
+        p = spec.payload or {}
+
+        # ── Threshold alert: plot column value vs. time with actual threshold lines ──
+        if spec.kind == "Threshold":
+            col = p.get("column", "")
+            if not col or col not in df.columns:
+                return None
+
+            ts_raw = parse_series_to_local_naive(df[tcol])
+            vals   = pd.to_numeric(df[col], errors="coerce")
+            mask   = ts_raw.notna() & vals.notna()
+            ts_raw = ts_raw[mask].reset_index(drop=True)
+            vals   = vals[mask].reset_index(drop=True)
+            order  = ts_raw.argsort()
+            ts_raw, vals = ts_raw.iloc[order], vals.iloc[order]
+
+            if ts_raw.empty:
+                return None
+
+            t_end   = ts_raw.max()
+            t_start = t_end - pd.Timedelta(hours=12)
+            m       = (ts_raw >= t_start) & (ts_raw <= t_end)
+            ts_raw, vals = ts_raw[m], vals[m]
+            if ts_raw.empty:
+                return None
+
+            red   = float(p.get("red",   0.0))
+            amber = float(p.get("amber", 0.0))
+            mode  = str(p.get("mode", "greater"))
+            cmp   = "≥" if mode == "greater" else "≤"
+
+            fig = Figure(figsize=(8, 3.2), tight_layout=True)
+            ax  = fig.add_subplot(111)
+            ax.plot(ts_raw, vals, linewidth=1.5, color="#0ea5e9", zorder=3)
+            ax.axhline(red,   color="#e03131", linestyle="--", linewidth=1,
+                       label=f"RED {cmp} {red:g}")
+            ax.axhline(amber, color="#f59f00", linestyle="--", linewidth=1,
+                       label=f"AMBER {cmp} {amber:g}")
+
+            locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+            ax.xaxis.set_major_locator(locator)
+            try:
+                ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+            except Exception:
+                pass
+
+            ax.set_title(
+                f"{getattr(host, 'table_name', '')} — {col} (last 12 h)",
+                fontsize=10,
+            )
+            ax.set_xlabel("Time (local)")
+            ax.set_ylabel(col)
+            ax.grid(True, linestyle="--", color="#e5e7eb", alpha=0.7)
+            ax.legend(fontsize=8)
+
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="alert_chart_")
+            os.close(fd)
+            fig.savefig(path, dpi=120)
+            return path
+
+        # ── Stale / other alerts: gap timeline ───────────────────────────────
         ts = parse_series_to_local_naive(df[tcol]).dropna().sort_values()
         if ts.empty:
             return None
@@ -70,7 +131,6 @@ def _generate_alert_chart(host, spec) -> Optional[str]:
         gaps_s = ts.diff().dropna().dt.total_seconds()
         t_ends = ts.iloc[1:]
 
-        p         = spec.payload or {}
         amber_min = int(p.get("amber_min", p.get("threshold_min", 30)))
         red_min   = int(p.get("red_min", max(amber_min * 2, 60)))
 
@@ -311,6 +371,11 @@ class AlertsTab(QWidget):
         self.history.verticalHeader().setVisible(False)
         self.history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         root.addWidget(self.history)
+
+        # Apply dark-mode palette so table cell backgrounds follow the theme.
+        # QSS sets the table widget background but not individual item cells;
+        # setting QPalette::Base ensures uncoloured cells are dark, not white.
+        self._apply_table_palette()
 
         # ---------- Timer ----------
         self._eval_running = False
@@ -784,6 +849,31 @@ class AlertsTab(QWidget):
             purge_orphaned_alert_state(self.db_path, self.host.table_name, [s.id for s in self.specs])
         except Exception:
             pass
+
+    # -------- Theme helpers --------
+    def _apply_table_palette(self):
+        """
+        Set QPalette Base/AlternateBase/Text on both alert tables so that
+        uncoloured item cells follow the dark theme instead of the system
+        default (white). This does NOT override cells that have an explicit
+        setBackground() colour (e.g., the coloured Status column).
+        """
+        from utils.charts.base import is_app_dark_mode
+        dark = is_app_dark_mode()
+        for tbl in (self.table, self.history):
+            pal = tbl.palette()
+            if dark:
+                pal.setColor(QPalette.ColorRole.Base,          QColor("#111827"))
+                pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#0f172a"))
+                pal.setColor(QPalette.ColorRole.Text,          QColor("#e5e7eb"))
+                pal.setColor(QPalette.ColorRole.Window,        QColor("#111827"))
+            else:
+                pal.setColor(QPalette.ColorRole.Base,          QColor("#ffffff"))
+                pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#f8fafc"))
+                pal.setColor(QPalette.ColorRole.Text,          QColor("#111827"))
+                pal.setColor(QPalette.ColorRole.Window,        QColor("#ffffff"))
+            tbl.setPalette(pal)
+            tbl.setAlternatingRowColors(True)
 
     # -------- Table rendering --------
     def refresh_table(self):

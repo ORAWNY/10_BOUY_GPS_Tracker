@@ -1,19 +1,32 @@
+# Core GUI
 PyQt6
+
+# Data
 pandas
-requests
-pywin32; sys_platform == "win32"
-geopandas
-scipy
+numpy
 
 # Geospatial / mapping
+geopandas
 cartopy
-matplotlib
 shapely
 pyproj
+scipy
 
-# Timezone data (safe cross-platform)
+# Plotting
+matplotlib
+
+# Networking / web
+requests
+flask
+
+# Authentication
+PyJWT
+
+# Windows-only (Outlook COM automation)
+pywin32; sys_platform == "win32"
+
+# Timezone data
 tzdata
 
-
-# If you need zoneinfo on Python < 3.9, uncomment:
-# backports.zoneinfo
+# Build tooling (only needed to produce .exe / .msi)
+# cx_Freeze

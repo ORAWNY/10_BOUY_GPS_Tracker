@@ -629,7 +629,7 @@ class XYRenderer(QWidget):
 
         # Canvas / axes
         self.canvas = FigureCanvas(Figure(figsize=(7.6, 3.8), tight_layout=True))
-        self.canvas.setMinimumHeight(120)
+        self.canvas.setMinimumHeight(0)
         self.ax_left = self.canvas.figure.add_subplot(111)
         self.ax_right = None
 
@@ -647,20 +647,26 @@ class XYRenderer(QWidget):
         self.full_btn.setToolTip("Toggle fullscreen")
         self.full_btn.clicked.connect(self._toggle_fullscreen)
 
-        # Layout for toolbar row
-        tool_row = QHBoxLayout()
-        tool_row.setContentsMargins(0, 0, 0, 0)
-        tool_row.setSpacing(6)
-        tool_row.addWidget(self.toolbar)
-        tool_row.addStretch(1)
-        tool_row.addWidget(self.cfg_btn)
-        tool_row.addWidget(self.full_btn)
-        lay.addLayout(tool_row)
+        # Toolbar row — hidden by default so the chart fills the card.
+        # Accessible via the card's  menu → Toggle Controls.
+        self._toolbar_widget = QWidget()
+        self._toolbar_widget.setContentsMargins(0, 0, 0, 0)
+        _tr = QHBoxLayout(self._toolbar_widget)
+        _tr.setContentsMargins(0, 0, 0, 0)
+        _tr.setSpacing(6)
+        _tr.addWidget(self.toolbar)
+        _tr.addStretch(1)
+        _tr.addWidget(self.cfg_btn)
+        _tr.addWidget(self.full_btn)
+        self._toolbar_widget.hide()
+        lay.addWidget(self._toolbar_widget)
         lay.addWidget(self.canvas)
 
-        # Hover readout label
+        # Hover readout label — compact single line below chart
         self.readout = QLabel(" ")
         self.readout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.readout.setFixedHeight(16)
+        self.readout.setStyleSheet("font-size: 10px; padding: 0 4px;")
         lay.addWidget(self.readout)
 
         # Hover/crosshair artists (lazy init)
@@ -681,7 +687,7 @@ class XYRenderer(QWidget):
         super().showEvent(event)
         if not getattr(self, '_has_been_shown', False):
             self._has_been_shown = True
-            self.canvas.draw()
+            self.refresh_data()
 
     # --------- helpers ---------
     def _maybe_epoch_to_datetime(self, s: pd.Series) -> Optional[pd.Series]:

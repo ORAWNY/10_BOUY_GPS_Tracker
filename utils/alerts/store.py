@@ -177,6 +177,21 @@ def read_last_status_meta(main_db_path: str, table_name: str, alert_id: str) -> 
         return (None, None)
     return (row[0], row[1])
 
+def read_last_observed(main_db_path: str, table_name: str, alert_id: str) -> Optional[float]:
+    """Return the last persisted observed value for an alert, or None."""
+    conn = _connect(main_db_path)
+    row = conn.execute(
+        "SELECT observed FROM alerts_last_status WHERE table_name=? AND alert_id=?",
+        (table_name, alert_id)
+    ).fetchone()
+    conn.close()
+    if row and row[0] is not None:
+        try:
+            return float(row[0])
+        except Exception:
+            return None
+    return None
+
 def write_last_status(main_db_path: str, table_name: str, alert_id: str, status: str, observed: Optional[float]) -> None:
     conn = _connect(main_db_path)
     conn.execute("""
@@ -400,7 +415,7 @@ def rotate_daily_alert_csvs(main_db_path: str, keep_days: int = 120) -> None:
 __all__ = [
     "ensure_alerts_tables",
     "write_settings_audit",
-    "read_last_status", "read_last_status_meta", "write_last_status",
+    "read_last_status", "read_last_status_meta", "read_last_observed", "write_last_status",
     "read_flag", "set_flag", "count_flagged", "clear_all_flags",
     "read_last_email", "write_last_email",
     "get_state_db_path_for", "prune_alerts_log",

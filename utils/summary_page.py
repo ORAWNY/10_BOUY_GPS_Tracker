@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid as _uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -34,8 +35,8 @@ from PyQt6.QtWidgets import (
 from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts import REGISTRY, AlertSpec
 from utils.alerts import summary_stale_alerts as stale_mod
-from utils.alerts.evaluator import load_specs
-from utils.alerts.store import ensure_alerts_tables, read_last_status
+from utils.alerts.evaluator import load_specs, save_specs
+from utils.alerts.store import ensure_alerts_tables, read_last_status, read_last_observed
 from utils.constants import is_battery_column
 
 # Force registration of the Stale handler (ensures REGISTRY["Stale"] exists)
@@ -220,7 +221,7 @@ class AlertsDelegate(QStyledItemDelegate):
         x = r.left() + 4
         cy = r.top() + r.height() // 2
 
-        for kind_char, level, enabled in badges:
+        for kind_char, level, enabled, *_ in badges:
             color = _status_color(level)
             if not enabled:
                 color = QColor("#adb5bd")   # grey-out disabled alerts
@@ -279,7 +280,7 @@ class BatteryDelegate(QStyledItemDelegate):
         cy = r.top() + r.height() // 2
 
         fm = painter.fontMetrics()
-        for value_str, level, enabled in badges:
+        for value_str, level, enabled, *_ in badges:
             color = _status_color(level)
             if not enabled:
                 color = QColor("#adb5bd")
@@ -307,7 +308,7 @@ class BatteryDelegate(QStyledItemDelegate):
             return QSize(50, super().sizeHint(option, index).height())
         fm = option.fontMetrics
         total_w = 8
-        for value_str, _level, _en in badges:
+        for value_str, _level, _en, *_ in badges:
             text_w = fm.horizontalAdvance(str(value_str))
             total_w += text_w + _BATT_HPAD * 2 + _BATT_GAP
         h = max(super().sizeHint(option, index).height(), _BATT_H + 6)
@@ -1191,21 +1192,29 @@ class SummaryPage(QWidget):
                     badges = self._load_alerts_status(table_name)
                     it = QTableWidgetItem("")
                     it.setData(ROLE_ALERTS, badges)
-                    tip_parts = [
-                        f"{ch}={'ON' if en else 'off'} ({lvl})"
-                        for ch, lvl, en in badges
-                    ]
-                    it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured. Click to add.")
+                    tip_parts = []
+                    for ch, lvl, en, *rest in badges:
+                        name = rest[0] if rest else ""
+                        obs  = rest[1] if len(rest) > 1 else ""
+                        label = name or ch
+                        tip = f"{label}: {'ON' if en else 'off'} ({lvl})"
+                        if obs:
+                            tip += f"  —  Latest: {obs}"
+                        tip_parts.append(tip)
+                    it.setToolTip("\n".join(tip_parts) if tip_parts else "No alerts configured. Click to add.")
                     self.table.setItem(r, c, it)
 
                 elif colname == "Battery":
                     batt_badges = self._load_battery_values(table_name)
                     it = QTableWidgetItem("")
                     it.setData(ROLE_BATTERY, batt_badges)
-                    tip_parts = [
-                        f"{val} ({'ON' if en else 'off'}, {lvl})"
-                        for val, lvl, en in batt_badges
-                    ]
+                    tip_parts = []
+                    for val, lvl, en, *rest in batt_badges:
+                        note = rest[0] if rest else None
+                        if note:
+                            tip_parts.append(f"{val}  —  {note}")
+                        else:
+                            tip_parts.append(f"{val} ({'ON' if en else 'off'}, {lvl})")
                     it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No Threshold alerts configured. Click to add.")
                     self.table.setItem(r, c, it)
 
@@ -1295,8 +1304,8 @@ class SummaryPage(QWidget):
 
     def _load_alerts_status(self, table: str) -> List[tuple]:
         """
-        Return [(kind_char, level, enabled), ...] for all saved alert specs for *table*.
-        Reads persisted last-status from the state DB (no evaluation).
+        Return [(kind_char, level, enabled, spec_name, observed_str), ...] for all saved
+        alert specs for *table*. Reads persisted last-status from the state DB (no evaluation).
         """
         try:
             specs = load_specs(self.db_path, table)
@@ -1308,37 +1317,60 @@ class SummaryPage(QWidget):
             # Battery threshold alerts belong in the Battery column, not here
             if self._spec_is_battery(spec):
                 continue
-            kind_char = self._KIND_TO_CHAR.get(spec.kind, spec.kind[:1].upper())
-            enabled = bool(getattr(spec, "enabled", True))
+            kind_char  = self._KIND_TO_CHAR.get(spec.kind, spec.kind[:1].upper())
+            spec_name  = str(spec.name or spec.kind)
+            enabled    = bool(getattr(spec, "enabled", True))
             if not enabled:
-                result.append((kind_char, "off", False))
+                result.append((kind_char, "off", False, spec_name, ""))
                 continue
-            # Read last persisted status from state DB
+            # Read last persisted status and observed value from state DB
             try:
                 raw = read_last_status(self.db_path, table, str(spec.id))
             except Exception:
                 raw = None
             level = _status_to_level(raw) if raw else "unknown"
-            result.append((kind_char, level, True))
+            try:
+                obs_val = read_last_observed(self.db_path, table, str(spec.id))
+                observed_str = f"{obs_val:.4g}" if obs_val is not None else ""
+            except Exception:
+                observed_str = ""
+            result.append((kind_char, level, True, spec_name, observed_str))
 
         return result
 
+    @staticmethod
+    def _inline_battery_level(v: float, payload: dict) -> str:
+        """Evaluate green/amber/red directly from a raw value using spec thresholds.
+
+        Used when a spec exists but has not yet been evaluated by the background
+        runner (read_last_status returns None on first load).
+        """
+        mode = str(payload.get("mode", "less"))
+        try:
+            red   = float(payload.get("red",   11.0))
+            amber = float(payload.get("amber", 11.8))
+        except (TypeError, ValueError):
+            return "unknown"
+        if mode == "greater":
+            if v >= red:   return "red"
+            if v >= amber: return "amber"
+            return "green"
+        else:  # "less" — lower voltage is worse
+            if v <= red:   return "red"
+            if v <= amber: return "amber"
+            return "green"
+
     def _load_battery_values(self, table: str) -> List[tuple]:
         """
-        Return [(value_str, level, enabled), ...] for the Battery column.
+        Return [(value_str, level, enabled, na_reason), ...] for the Battery column.
+        na_reason is None for valid readings, or a short explanation string when N/A.
 
-        Two sources are combined:
-
-        1. **Configured threshold alerts** that are battery-type (``_spec_is_battery``
-           returns True).  These show alert-evaluated levels (green/amber/red/off).
-
-        2. **Auto-discovered columns** — any column in the DB table whose name
-           matches the battery/voltage pattern (``is_battery_column``) but has no
-           threshold alert configured.  These show the latest raw value with a grey
-           "no alert" level so the user can still see the reading.
-
-        Pills from source 1 are listed first; source 2 appended after, sorted
-        alphabetically by column name to keep the display stable.
+        Any battery/voltage column found in the DB that does not yet have a
+        ThresholdAlertSpec is automatically registered with sensible 12 V
+        defaults (mode=less, red≤11.0 V, amber≤11.8 V).  This means:
+          • The pill shows a real green/amber/red colour immediately.
+          • The spec appears in the Alerts panel so the user can tune it.
+          • All pills consistently show "ColumnName: X.XV".
         """
         try:
             specs = load_specs(self.db_path, table)
@@ -1346,36 +1378,76 @@ class SummaryPage(QWidget):
             specs = []
 
         battery_specs = [s for s in specs if self._spec_is_battery(s)]
-        # Columns already covered by a configured threshold alert
-        alerted_cols = {str(s.payload.get("column", "")) for s in battery_specs}
+        alerted_cols  = {str(s.payload.get("column", "")) for s in battery_specs}
 
+        needs_save = False
         result = []
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
-                dt_col = _choose_dt_col(conn, table)
+                dt_col     = _choose_dt_col(conn, table)
                 order_expr = f'"{dt_col}"' if dt_col else "rowid"
 
-                # ── 1. Configured battery threshold alerts ─────────────────────
+                # ── Auto-register any unconfigured battery columns ─────────────
+                all_cols  = _table_columns(conn, table)
+                auto_cols = sorted(
+                    c for c in all_cols
+                    if is_battery_column(c) and c not in alerted_cols
+                )
+                for col in auto_cols:
+                    new_spec = AlertSpec(
+                        id=str(_uuid.uuid4()),
+                        kind="Threshold",
+                        name=f"Battery \u2014 {col}",
+                        enabled=True,
+                        recipients=[],
+                        payload={
+                            "column": col,
+                            "mode": "less",      # lower voltage = worse
+                            "red":   11.0,
+                            "amber": 11.8,
+                            "green": 12.5,
+                            "scope": "most_recent",
+                            "is_battery": True,
+                            "interval_min": 15,
+                            "email_cooldown_min": 240,
+                            "email_on_escalation": False,
+                            "email_on_recovery": False,
+                            "recipients": [],
+                        },
+                    )
+                    specs.append(new_spec)
+                    battery_specs.append(new_spec)
+                    alerted_cols.add(col)
+                    needs_save = True
+
+                # ── Build pills for every battery spec ─────────────────────────
                 for spec in battery_specs:
                     enabled = bool(getattr(spec, "enabled", True))
-                    p = spec.payload or {}
+                    p       = spec.payload or {}
                     val_col = str(p.get("column", "") or "")
 
-                    value_str = "N/A"
-                    if val_col:
+                    raw_val   = None
+                    na_reason = None
+                    value_str = f"{val_col}: N/A" if val_col else "N/A"
+                    if not val_col:
+                        na_reason = "No column configured for this alert"
+                    else:
                         try:
                             row = conn.execute(
                                 f'SELECT "{val_col}" FROM "{table}" '
+                                f'WHERE "{val_col}" IS NOT NULL '
                                 f'ORDER BY {order_expr} DESC LIMIT 1'
                             ).fetchone()
-                            if row and row[0] is not None:
+                            if row is None:
+                                na_reason = "No readings found for this sensor"
+                            else:
                                 try:
-                                    v = float(row[0])
-                                    value_str = f"{v:.1f}V"
+                                    raw_val   = float(row[0])
+                                    value_str = f"{val_col}: {raw_val:.1f}V"
                                 except Exception:
-                                    value_str = str(row[0])[:8]
+                                    value_str = f"{val_col}: {str(row[0])[:6]}"
                         except Exception:
-                            value_str = "N/A"
+                            na_reason = "Could not read from database"
 
                     if not enabled:
                         level = "off"
@@ -1384,40 +1456,25 @@ class SummaryPage(QWidget):
                             raw = read_last_status(self.db_path, table, str(spec.id))
                         except Exception:
                             raw = None
-                        level = _status_to_level(raw) if raw else "unknown"
-
-                    result.append((value_str, level, enabled))
-
-                # ── 2. Auto-discovered battery columns (no alert configured) ───
-                all_cols = _table_columns(conn, table)
-                auto_cols = sorted(
-                    c for c in all_cols
-                    if is_battery_column(c) and c not in alerted_cols
-                )
-                for col in auto_cols:
-                    try:
-                        row = conn.execute(
-                            f'SELECT "{col}" FROM "{table}" '
-                            f'ORDER BY {order_expr} DESC LIMIT 1'
-                        ).fetchone()
-                        if row and row[0] is not None:
-                            try:
-                                v = float(row[0])
-                                # Include the column name so the user can tell
-                                # Bat1 / Bat2 / Bat3 / Volt apart at a glance.
-                                value_str = f"{col}: {v:.1f}V"
-                            except Exception:
-                                value_str = f"{col}: {str(row[0])[:6]}"
+                        if raw:
+                            level = _status_to_level(raw)
+                        elif raw_val is not None:
+                            # Spec exists but hasn't been evaluated yet — compute inline
+                            level = self._inline_battery_level(raw_val, p)
                         else:
-                            value_str = f"{col}: N/A"
-                    except Exception:
-                        value_str = f"{col}: N/A"
+                            level = "unknown"
 
-                    # "unknown" renders as grey — no alert, just raw reading
-                    result.append((value_str, "unknown", True))
+                    result.append((value_str, level, enabled, na_reason))
 
         except Exception:
             pass
+
+        # Persist any newly auto-registered specs
+        if needs_save:
+            try:
+                save_specs(self.db_path, table, specs)
+            except Exception:
+                pass
 
         return result
 
@@ -1445,8 +1502,16 @@ class SummaryPage(QWidget):
                     it = QTableWidgetItem("")
                     self.table.setItem(r, col_alerts, it)
                 it.setData(ROLE_ALERTS, badges)
-                tip_parts = [f"{ch}={'ON' if en else 'off'} ({lvl})" for ch, lvl, en in badges]
-                it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No alerts configured.")
+                tip_parts = []
+                for ch, lvl, en, *rest in badges:
+                    name = rest[0] if rest else ""
+                    obs  = rest[1] if len(rest) > 1 else ""
+                    label = name or ch
+                    tip = f"{label}: {'ON' if en else 'off'} ({lvl})"
+                    if obs:
+                        tip += f"  —  Latest: {obs}"
+                    tip_parts.append(tip)
+                it.setToolTip("\n".join(tip_parts) if tip_parts else "No alerts configured.")
 
             if col_batt >= 0:
                 batt_badges = self._load_battery_values(table)
@@ -1455,7 +1520,13 @@ class SummaryPage(QWidget):
                     it = QTableWidgetItem("")
                     self.table.setItem(r, col_batt, it)
                 it.setData(ROLE_BATTERY, batt_badges)
-                tip_parts = [f"{v} ({'ON' if en else 'off'}, {lvl})" for v, lvl, en in batt_badges]
+                tip_parts = []
+                for v, lvl, en, *rest in batt_badges:
+                    note = rest[0] if rest else None
+                    if note:
+                        tip_parts.append(f"{v}  —  {note}")
+                    else:
+                        tip_parts.append(f"{v} ({'ON' if en else 'off'}, {lvl})")
                 it.setToolTip("  |  ".join(tip_parts) if tip_parts else "No Threshold alerts configured.")
 
             break

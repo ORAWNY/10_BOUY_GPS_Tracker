@@ -302,9 +302,15 @@ class WindRoseRenderer(QWidget):
 
         lay = QVBoxLayout(self)
         self.canvas = FigureCanvas(Figure(figsize=(7.6, 3.8), tight_layout=True))
-        self.canvas.setMinimumHeight(240)
+        self.canvas.setMinimumHeight(120)
         lay.addWidget(self.canvas)
         self.refresh_data()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_has_been_shown', False):
+            self._has_been_shown = True
+            self.refresh_data()
 
     # --- Helpers ---
     def _filter_by_date(self, df: pd.DataFrame, p: Dict[str, Any]) -> pd.DataFrame:

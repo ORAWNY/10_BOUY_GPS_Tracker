@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from utils.alerts import register, AlertSpec, AlertHandler, EvalResult, Status, Host
 from utils.time_settings import parse_series_to_local_naive
 from utils.constants import is_battery_column
+from utils.charts.base import alert_chart_colors
 
 
 # --------------------------- Editor (unchanged) ---------------------------
@@ -331,9 +332,10 @@ class _ThresholdViewer(QDialog):
         return d, tcol, vcol, share
 
     def _rebuild(self):
+        c = alert_chart_colors()
         self.ax.clear()
-        self.fig.patch.set_facecolor("#ffffff")
-        self.ax.set_facecolor("#ffffff")
+        self.fig.patch.set_facecolor(c["fig_bg"])
+        self.ax.set_facecolor(c["ax_bg"])
 
         d, tcol, vcol, share = self._current_windowed()
         if d.empty:
@@ -356,13 +358,13 @@ class _ThresholdViewer(QDialog):
 
         # ── Coloured status bands (drawn first, behind everything) ──────────
         if mode == "greater":
-            self.ax.axhspan(y_lo,          min(a, y_hi),  facecolor="#dcfce7", alpha=0.55, linewidth=0, zorder=0)
-            self.ax.axhspan(min(a, y_hi),  min(r, y_hi),  facecolor="#fef9c3", alpha=0.55, linewidth=0, zorder=0)
-            self.ax.axhspan(min(r, y_hi),  y_hi,          facecolor="#fee2e2", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(y_lo,          min(a, y_hi),  facecolor=c["band_green"], alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(a, y_hi),  min(r, y_hi),  facecolor=c["band_amber"], alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(r, y_hi),  y_hi,          facecolor=c["band_red"],   alpha=0.55, linewidth=0, zorder=0)
         else:
-            self.ax.axhspan(y_lo,          min(r, y_hi),  facecolor="#fee2e2", alpha=0.55, linewidth=0, zorder=0)
-            self.ax.axhspan(min(r, y_hi),  min(a, y_hi),  facecolor="#fef9c3", alpha=0.55, linewidth=0, zorder=0)
-            self.ax.axhspan(min(a, y_hi),  y_hi,          facecolor="#dcfce7", alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(y_lo,          min(r, y_hi),  facecolor=c["band_red"],   alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(r, y_hi),  min(a, y_hi),  facecolor=c["band_amber"], alpha=0.55, linewidth=0, zorder=0)
+            self.ax.axhspan(min(a, y_hi),  y_hi,          facecolor=c["band_green"], alpha=0.55, linewidth=0, zorder=0)
 
         # ── Threshold lines ──────────────────────────────────────────────────
         self.ax.axhline(r, color="#ef4444", linestyle="--", linewidth=1.2, alpha=0.9, zorder=2, label=f"RED  {r:g}")
@@ -376,16 +378,16 @@ class _ThresholdViewer(QDialog):
         self.ax.set_ylim(y_lo, y_hi)
         for sp in ["top", "right"]:
             self.ax.spines[sp].set_visible(False)
-        self.ax.spines["left"].set_color("#d1d5db")
-        self.ax.spines["bottom"].set_color("#d1d5db")
+        self.ax.spines["left"].set_color(c["spine"])
+        self.ax.spines["bottom"].set_color(c["spine"])
         self.ax.set_axisbelow(True)
-        self.ax.yaxis.grid(True, linestyle="--", color="#e5e7eb", linewidth=0.8)
+        self.ax.yaxis.grid(True, linestyle="--", color=c["grid"], linewidth=0.8)
         self.ax.xaxis.grid(False)
-        self.ax.tick_params(colors="#6b7280", labelsize=9)
-        self.ax.set_ylabel(vcol, color="#374151", fontsize=10, labelpad=8)
-        self.ax.set_xlabel("Time (local)", color="#374151", fontsize=10, labelpad=6)
+        self.ax.tick_params(colors=c["tick"], labelsize=9)
+        self.ax.set_ylabel(vcol, color=c["label"], fontsize=10, labelpad=8)
+        self.ax.set_xlabel("Time (local)", color=c["label"], fontsize=10, labelpad=6)
         self.ax.set_title(self.spec.name or "Threshold preview",
-                          color="#111827", fontsize=12, fontweight="bold", pad=10)
+                          color=c["title"], fontsize=12, fontweight="bold", pad=10)
 
         locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
         self.ax.xaxis.set_major_locator(locator)
@@ -395,7 +397,7 @@ class _ThresholdViewer(QDialog):
             pass
 
         self.ax.legend(loc="best", fontsize=8, framealpha=0.92,
-                       edgecolor="#e5e7eb", facecolor="#ffffff")
+                       edgecolor=c["legend_edge"], facecolor=c["legend_bg"])
         self.fig.tight_layout(pad=1.4)
         self.canvas.draw_idle()
 

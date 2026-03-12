@@ -139,13 +139,17 @@ QFrame#chart_card {
     border: 1px solid #334155;
     border-radius: 8px;
 }
-QFrame#card_hdr {
-    background: #1e293b;
-    border-bottom: 1px solid #334155;
+QFrame#card_hdr_overlay {
+    background: rgba(15, 23, 42, 0.88);
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.6);
 }
-QSplitter#chart_vsplit::handle { background: #334155; }
-QSplitter#chart_vsplit::handle:hover { background: #64748b; }
 QSplitter#chart_row::handle { background: #334155; border-radius: 3px; }
 QSplitter#chart_row::handle:hover { background: #64748b; }
+QFrame#row_resize_handle {
+    background: #1e293b;
+    border-top: 2px solid #334155;
+    border-radius: 0 0 6px 6px;
+}
+QFrame#row_resize_handle:hover { background: #334155; border-top-color: #64748b; }

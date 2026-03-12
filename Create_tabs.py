@@ -495,8 +495,8 @@ class TableTab(QWidget):
 
         overview_v.addLayout(dates)
 
-        ov_scroll, self.overview_board, self._overview_overlay = self._build_board_with_overlay()
-        overview_v.addWidget(ov_scroll)
+        ov_container, self.overview_board, self._overview_overlay = self._build_board_with_overlay()
+        overview_v.addWidget(ov_container, 1)
 
         # ===== Charts =====
         charts_tab = QWidget(self)
@@ -505,8 +505,8 @@ class TableTab(QWidget):
         filters = self._build_filters_widget(charts_tab)
         charts_v.addWidget(filters)
 
-        charts_scroll, self.charts_board, self._charts_overlay = self._build_board_with_overlay()
-        charts_v.addWidget(charts_scroll)
+        charts_container, self.charts_board, self._charts_overlay = self._build_board_with_overlay()
+        charts_v.addWidget(charts_container, 1)
 
         # Alerts engine (hidden — not added as a visible tab; managed via Summary page)
         self.alerts_tab = AlertsTab(self, self.db_path, logger=None)
@@ -585,14 +585,10 @@ class TableTab(QWidget):
         if board and hasattr(board, "changed"):
             board.changed.connect(lambda: self._sync_overlay_visibility(board, stack, overlay))
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
-        # critical so the scroll area doesn’t enforce a large minimum
-        scroll.setMinimumSize(0, 0)
-        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        container.setMinimumSize(0, 0)
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        return scroll, board, overlay
+        return container, board, overlay
 
     def _sync_overlay_visibility(self, board: ChartBoard | None, _stack: QStackedLayout,
                                  overlay: _BoardOverlay | None = None):
@@ -677,8 +673,8 @@ class TableTab(QWidget):
         v = QVBoxLayout(tab)
         filters_box = self._build_filters_widget(tab)
         v.addWidget(filters_box)
-        scroll, board, _overlay = self._build_board_with_overlay()
-        v.addWidget(scroll)
+        container, board, _overlay = self._build_board_with_overlay()
+        v.addWidget(container, 1)
 
         if board:
             self.extra_tabs.append((tab_name, board))
@@ -1002,7 +998,7 @@ class TableTab(QWidget):
                 state = item.get("state") or {}
                 tab = QWidget(self); v = QVBoxLayout(tab)
                 filters_box = self._build_filters_widget(tab); v.addWidget(filters_box)
-                scroll, board, _overlay = self._build_board_with_overlay(); v.addWidget(scroll)
+                container, board, _overlay = self._build_board_with_overlay(); v.addWidget(container, 1)
                 if board:
                     try: board.import_state(state)
                     except Exception: pass

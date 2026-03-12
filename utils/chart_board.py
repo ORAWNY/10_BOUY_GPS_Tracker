@@ -1,4 +1,4 @@
-"""utils/chart_board.py — robust chart dashboard with drag-and-drop reordering."""
+"""utils/chart_board.py — chart dashboard with hover overlays, row-resize handles, and DnD."""
 from __future__ import annotations
 
 import uuid
@@ -7,17 +7,16 @@ from typing import Callable, Dict, List, Optional, Any
 
 import pandas as pd
 
-from PyQt6.QtCore import Qt, QPoint, QByteArray, QMimeData, pyqtSignal
-from PyQt6.QtGui import QAction, QDrag, QPainter, QColor, QPen
+from PyQt6.QtCore import Qt, QPoint, QByteArray, QMimeData, pyqtSignal, QTimer, QEvent
+from PyQt6.QtGui import QAction, QDrag, QPainter, QColor, QPen, QCursor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QToolButton, QMenu, QSizePolicy, QFrame,
-    QSplitter, QInputDialog, QToolBar, QApplication,
+    QSplitter, QInputDialog, QToolBar, QApplication, QScrollArea,
 )
 
 from utils.charts import ChartSpec, REGISTRY
 
-# MIME type used for drag-and-drop between chart cards
 _CHART_MIME = "application/x-chart-id"
 
 
@@ -25,18 +24,18 @@ _CHART_MIME = "application/x-chart-id"
 
 class ChartCardWidget(QFrame):
     """
-    A styled frame containing a chart renderer with a compact header menu.
+    Chart card: renderer fills the card edge-to-edge.
 
-    Colours are defined in resource/styles/dark.qss and light.qss via the
-    QFrame#chart_card and QFrame#card_hdr selectors — no hardcoded hex colours
-    here so both themes work automatically.
-
-    Drag-and-drop: grab the ⠿ handle in the header and drag onto any other
-    card to reorder. A blue border highlights the drop target.
+    Controls (drag handle, title, menu) appear as a semi-transparent overlay
+    whenever the mouse is anywhere inside the card — including over the
+    matplotlib canvas child. This works via WA_Hover which fires HoverEnter /
+    HoverLeave events even when child widgets are under the cursor.
     """
 
-    changed       = pyqtSignal()
-    drop_requested = pyqtSignal(str, str)  # (dragged_spec_id, target_spec_id)
+    changed        = pyqtSignal()
+    drop_requested = pyqtSignal(str, str)
+
+    _HDR_H = 36
 
     def __init__(
         self,
@@ -47,9 +46,9 @@ class ChartCardWidget(QFrame):
         parent=None,
     ):
         super().__init__(parent)
-        self.spec = spec
-        self.get_df = get_df
-        self.columns = columns
+        self.spec        = spec
+        self.get_df      = get_df
+        self.columns     = columns
         self.get_df_full = get_df_full
 
         self._is_drop_target = False
@@ -59,78 +58,14 @@ class ChartCardWidget(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAcceptDrops(True)
+        # WA_Hover: Qt sends HoverEnter/HoverLeave even when a child has the mouse
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Header ──────────────────────────────────────────────────────────
-        hdr = QFrame(self)
-        hdr.setObjectName("card_hdr")
-        hdr.setFixedHeight(34)
-        hdr_lay = QHBoxLayout(hdr)
-        hdr_lay.setContentsMargins(6, 0, 6, 0)
-        hdr_lay.setSpacing(4)
-
-        # Drag handle
-        self._drag_hdl = QLabel("⠿")
-        self._drag_hdl.setFixedWidth(16)
-        self._drag_hdl.setCursor(Qt.CursorShape.SizeAllCursor)
-        self._drag_hdl.setToolTip("Drag to reposition")
-        self._drag_hdl.setStyleSheet(
-            "font-size: 14px; background: transparent; border: none;"
-        )
-        self._drag_hdl.mousePressEvent = self._hdl_press
-        self._drag_hdl.mouseMoveEvent  = self._hdl_move
-        hdr_lay.addWidget(self._drag_hdl)
-
-        self._title = QLabel(spec.title or spec.chart_kind)
-        self._title.setStyleSheet(
-            "font-weight: 600; font-size: 12px; background: transparent; border: none;"
-        )
-        hdr_lay.addWidget(self._title, 1)
-
-        self._kind_pill = QLabel(spec.chart_kind)
-        self._kind_pill.setStyleSheet(
-            "font-size: 10px; background: rgba(128,128,128,0.18); "
-            "border-radius: 8px; padding: 1px 7px; border: none;"
-        )
-        hdr_lay.addWidget(self._kind_pill)
-
-        self._menu_btn = QToolButton(hdr)
-        self._menu_btn.setText("⋯")
-        self._menu_btn.setFixedSize(26, 26)
-        self._menu_btn.setStyleSheet(
-            "QToolButton { border: none; background: transparent; font-size: 16px; "
-            "  border-radius: 5px; }"
-            "QToolButton:hover { background: rgba(128,128,128,0.2); }"
-        )
-        self._menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-
-        menu = QMenu(self)
-        self._act_cfg   = QAction("⚙  Configure…",          self)
-        self._act_left  = QAction("←  Move Left",            self)
-        self._act_right = QAction("→  Move Right",           self)
-        self._act_up    = QAction("↑  Move to Row Above",    self)
-        self._act_down  = QAction("↓  Move to Row Below",    self)
-        self._act_above = QAction("⤒  New Row Above",        self)
-        self._act_below = QAction("⤓  New Row Below",        self)
-        self._act_rm    = QAction("✕  Remove",               self)
-
-        menu.addAction(self._act_cfg)
-        menu.addSeparator()
-        menu.addActions([self._act_left, self._act_right,
-                         self._act_up,   self._act_down])
-        menu.addSeparator()
-        menu.addActions([self._act_above, self._act_below])
-        menu.addSeparator()
-        menu.addAction(self._act_rm)
-
-        self._menu_btn.setMenu(menu)
-        hdr_lay.addWidget(self._menu_btn)
-        root.addWidget(hdr)
-
-        # ── Renderer ────────────────────────────────────────────────────────
+        # ── Renderer fills the card ──────────────────────────────────────────
         handler = REGISTRY.get(spec.chart_kind)
         if handler:
             self.renderer = handler.create_renderer(
@@ -155,9 +90,123 @@ class ChartCardWidget(QFrame):
             root.addWidget(self.renderer, 1)
             self._clear_toolbar_inline_style()
 
+        # ── Hover overlay (floating, not in layout) ──────────────────────────
+        self._hdr = QFrame(self)
+        self._hdr.setObjectName("card_hdr_overlay")
+        self._hdr.setFixedHeight(self._HDR_H)
+        self._hdr.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        hdr_lay = QHBoxLayout(self._hdr)
+        hdr_lay.setContentsMargins(6, 0, 6, 0)
+        hdr_lay.setSpacing(4)
+
+        self._drag_hdl = QLabel("\u2807")
+        self._drag_hdl.setFixedWidth(16)
+        self._drag_hdl.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._drag_hdl.setToolTip("Drag to reposition")
+        self._drag_hdl.setStyleSheet("font-size: 14px; background: transparent; border: none;")
+        self._drag_hdl.mousePressEvent = self._hdl_press
+        self._drag_hdl.mouseMoveEvent  = self._hdl_move
+        hdr_lay.addWidget(self._drag_hdl)
+
+        self._title = QLabel(spec.title or spec.chart_kind)
+        self._title.setStyleSheet(
+            "font-weight: 600; font-size: 12px; background: transparent; border: none;"
+        )
+        hdr_lay.addWidget(self._title, 1)
+
+        self._kind_pill = QLabel(spec.chart_kind)
+        self._kind_pill.setStyleSheet(
+            "font-size: 10px; background: rgba(128,128,128,0.22); "
+            "border-radius: 8px; padding: 1px 7px; border: none;"
+        )
+        hdr_lay.addWidget(self._kind_pill)
+
+        self._menu_btn = QToolButton(self._hdr)
+        self._menu_btn.setText("\u22ef")
+        self._menu_btn.setFixedSize(26, 26)
+        self._menu_btn.setStyleSheet(
+            "QToolButton { border: none; background: transparent; font-size: 16px;"
+            "  border-radius: 5px; }"
+            "QToolButton:hover { background: rgba(128,128,128,0.25); }"
+        )
+        self._menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+        menu = QMenu(self)
+        self._act_cfg   = QAction("\u2699  Configure\u2026",    self)
+        self._act_left  = QAction("\u2190  Move Left",          self)
+        self._act_right = QAction("\u2192  Move Right",         self)
+        self._act_up    = QAction("\u2191  Move to Row Above",  self)
+        self._act_down  = QAction("\u2193  Move to Row Below",  self)
+        self._act_above = QAction("\u2912  New Row Above",      self)
+        self._act_below = QAction("\u2913  New Row Below",      self)
+        self._act_rm    = QAction("\u2715  Remove",             self)
+
+        menu.addAction(self._act_cfg)
+        menu.addSeparator()
+        menu.addActions([self._act_left, self._act_right,
+                         self._act_up,   self._act_down])
+        menu.addSeparator()
+        menu.addActions([self._act_above, self._act_below])
+
+        if hasattr(self.renderer, "_toggle_fullscreen"):
+            self._act_fs = QAction("\u26f6  Fullscreen", self)
+            self._act_fs.triggered.connect(self.renderer._toggle_fullscreen)
+            menu.addSeparator()
+            menu.addAction(self._act_fs)
+
+        if hasattr(self.renderer, "_toolbar_widget"):
+            self._act_toolbar = QAction("\u2630  Toggle Controls", self)
+            self._act_toolbar.triggered.connect(
+                lambda: self.renderer._toolbar_widget.setVisible(
+                    not self.renderer._toolbar_widget.isVisible()
+                )
+            )
+            menu.addSeparator()
+            menu.addAction(self._act_toolbar)
+
+        menu.addSeparator()
+        menu.addAction(self._act_rm)
+        self._menu_btn.setMenu(menu)
+        hdr_lay.addWidget(self._menu_btn)
+
+        self._hdr.hide()
+
+        self._leave_timer = QTimer(self)
+        self._leave_timer.setSingleShot(True)
+        self._leave_timer.timeout.connect(self._check_hide_hdr)
+
         self._act_cfg.triggered.connect(self._configure)
 
-    # ── Drag handle events ────────────────────────────────────────────────────
+    # ── Hover via WA_Hover (fires even when child widgets have the mouse) ─────
+
+    def event(self, ev: QEvent) -> bool:
+        t = ev.type()
+        if t == QEvent.Type.HoverEnter:
+            self._leave_timer.stop()
+            self._hdr.show()
+            self._hdr.raise_()
+        elif t == QEvent.Type.HoverLeave:
+            self._leave_timer.start(350)
+        return super().event(ev)
+
+    def _check_hide_hdr(self):
+        if self._menu_btn.menu() and self._menu_btn.menu().isVisible():
+            self._leave_timer.start(200)
+            return
+        pos = self.mapFromGlobal(QCursor.pos())
+        if not self.rect().contains(pos):
+            self._hdr.hide()
+
+    # ── Overlay geometry ──────────────────────────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._hdr.setGeometry(0, 0, self.width(), self._HDR_H)
+        if self._hdr.isVisible():
+            self._hdr.raise_()
+
+    # ── Drag handle ───────────────────────────────────────────────────────────
 
     def _hdl_press(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -176,7 +225,6 @@ class ChartCardWidget(QFrame):
         mime = QMimeData()
         mime.setData(_CHART_MIME, QByteArray(self.spec.id.encode()))
         drag.setMimeData(mime)
-        # Scaled thumbnail as drag pixmap
         pix = self.grab().scaled(
             220, 130,
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -186,7 +234,7 @@ class ChartCardWidget(QFrame):
         drag.setHotSpot(QPoint(pix.width() // 2, 8))
         drag.exec(Qt.DropAction.MoveAction)
 
-    # ── Drop target events ────────────────────────────────────────────────────
+    # ── Drop target ───────────────────────────────────────────────────────────
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(_CHART_MIME):
@@ -221,10 +269,9 @@ class ChartCardWidget(QFrame):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _clear_toolbar_inline_style(self):
-        """Remove hardcoded light-mode styles from embedded matplotlib toolbars."""
         try:
             for tb in self.findChildren(QToolBar):
-                tb.setStyleSheet("")   # inherit from global QSS
+                tb.setStyleSheet("")
         except Exception:
             pass
 
@@ -243,6 +290,64 @@ class ChartCardWidget(QFrame):
             self.changed.emit()
 
 
+# ── Row widget ────────────────────────────────────────────────────────────────
+
+class _RowWidget(QFrame):
+    """
+    One dashboard row: a horizontal QSplitter holding chart cards, with a
+    draggable resize handle at the bottom so users can set the row height
+    independently.  Rows are stacked in a QScrollArea so the dashboard
+    can grow beyond the window height.
+    """
+
+    DEFAULT_H = 340
+    MIN_H     = 180
+    HANDLE_H  = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("chart_row_frame")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.DEFAULT_H)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("chart_row")
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(6)
+        lay.addWidget(self.splitter, 1)
+
+        # Resize handle
+        self._rh = QFrame(self)
+        self._rh.setObjectName("row_resize_handle")
+        self._rh.setFixedHeight(self.HANDLE_H)
+        self._rh.setCursor(Qt.CursorShape.SizeVerCursor)
+        self._rh.setToolTip("Drag to resize row")
+        lay.addWidget(self._rh)
+
+        self._drag_y: Optional[float] = None
+        self._rh.mousePressEvent   = self._rh_press
+        self._rh.mouseMoveEvent    = self._rh_move
+        self._rh.mouseReleaseEvent = self._rh_release
+
+    def _rh_press(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._drag_y = ev.globalPosition().y()
+
+    def _rh_move(self, ev):
+        if self._drag_y is None:
+            return
+        dy = int(ev.globalPosition().y() - self._drag_y)
+        self._drag_y = ev.globalPosition().y()
+        self.setFixedHeight(max(self.MIN_H, self.height() + dy))
+
+    def _rh_release(self, ev):
+        self._drag_y = None
+
+
 # ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -252,29 +357,41 @@ class _Item:
 
 @dataclass
 class _Row:
-    splitter: QSplitter
+    widget: _RowWidget
     items: List[_Item] = field(default_factory=list)
+
+    @property
+    def splitter(self) -> QSplitter:
+        return self.widget.splitter
 
 
 # ── Board ─────────────────────────────────────────────────────────────────────
 
 class ChartBoard(QWidget):
     """
-    Robust chart dashboard with drag-and-drop reordering.
+    Dashboard of chart cards.
 
     Layout
     ------
-    Vertical QSplitter (self._vsplit)
-      └─ Horizontal QSplitter per row  [objectName = "chart_row"]
-           └─ ChartCardWidget  (sits directly in the row splitter)
+    Fixed top bar  (38 px)
+    QScrollArea
+      └─ QVBoxLayout of _RowWidget instances
+           └─ each row: horizontal QSplitter of ChartCardWidget + resize handle
+
+    Scrolling
+    ---------
+    Rows have a fixed default height (340 px) that the user can change by
+    dragging the handle at the bottom of each row.  The scroll area ensures
+    the dashboard is usable no matter how many rows are added.
+
+    Hover overlays
+    --------------
+    ChartCardWidget uses WA_Hover so its overlay fires even when the matplotlib
+    canvas child has the cursor — no event-filter gymnastics needed.
 
     Drag-and-drop
     -------------
-    Grab the ⠿ handle in any card header and drag it onto another card.
-    The board swaps/moves positions using _rebuild_row() which is crash-safe:
-    self._cards keeps live references so setParent(None) never GC's a card.
-
-    Menu moves (←→↑↓ and new-row) remain available via the ⋯ card menu.
+    Hover any card → the ⠿ handle appears → drag onto another card.
     """
 
     changed = pyqtSignal()
@@ -288,86 +405,95 @@ class ChartBoard(QWidget):
         initial_rows: int = 1,
     ):
         super().__init__(parent)
-        self.get_df = get_df
-        self.columns = columns
+        self.get_df      = get_df
+        self.columns     = columns
         self.get_df_full = get_df_full
 
         self.rows: List[_Row] = []
-        self._cards: Dict[str, ChartCardWidget] = {}  # spec.id → live card
+        self._cards: Dict[str, ChartCardWidget] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Toolbar bar ───────────────────────────────────────────────────────
+        # ── Compact top bar ───────────────────────────────────────────────────
         bar_frame = QFrame(self)
         bar_frame.setObjectName("chart_board_bar")
-        bar_frame.setFixedHeight(44)
+        bar_frame.setFixedHeight(38)
         bar = QHBoxLayout(bar_frame)
-        bar.setContentsMargins(12, 0, 12, 0)
-        bar.setSpacing(8)
+        bar.setContentsMargins(10, 0, 10, 0)
+        bar.setSpacing(6)
 
         bar_title = QLabel("Dashboard")
-        bar_title.setStyleSheet(
-            "font-weight: 600; font-size: 13px; background: transparent;"
-        )
+        bar_title.setStyleSheet("font-weight: 600; font-size: 12px; background: transparent;")
         bar.addWidget(bar_title)
         bar.addStretch(1)
 
-        self._refresh_btn = self._mk_ghost_btn("⟳", "Refresh all charts")
-        self._full_btn    = self._mk_ghost_btn("⛶", "Toggle full screen")
-        self._add_btn     = QPushButton("＋  Add Chart")
-        self._add_btn.setFixedHeight(30)
+        self._refresh_btn = self._mk_ghost_btn("\u27f3", "Refresh all charts")
+        self._full_btn    = self._mk_ghost_btn("\u26f6", "Toggle full screen")
+        self._add_btn     = QPushButton("\uff0b  Add Chart")
+        self._add_btn.setFixedHeight(26)
         self._add_btn.setToolTip("Add a new chart to the dashboard")
         self._add_btn.setStyleSheet(
-            "QPushButton { font-size: 12px; font-weight: 600; color: #ffffff; "
-            "  background: #2563eb; border: none; border-radius: 7px; padding: 4px 16px; }"
+            "QPushButton { font-size: 11px; font-weight: 600; color: #ffffff;"
+            "  background: #2563eb; border: none; border-radius: 6px; padding: 3px 14px; }"
             "QPushButton:hover   { background: #1d4ed8; }"
             "QPushButton:pressed { background: #1e40af; }"
         )
-
         bar.addWidget(self._refresh_btn)
         bar.addWidget(self._add_btn)
         bar.addWidget(self._full_btn)
         root.addWidget(bar_frame)
 
-        # ── Vertical splitter — fills all remaining space ──────────────────────
-        # No QScrollArea wrapper: the splitter takes the full available height so
-        # every row handle is freely draggable without fighting scroll geometry.
-        self._vsplit = QSplitter(Qt.Orientation.Vertical)
-        self._vsplit.setObjectName("chart_vsplit")
-        self._vsplit.setChildrenCollapsible(False)
-        self._vsplit.setHandleWidth(8)
-        self._vsplit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        root.addWidget(self._vsplit, 1)
+        # ── Scroll area containing all rows ──────────────────────────────────
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # Empty-state placeholder (shown in place of vsplit when no charts)
-        self._empty = QLabel(
-            "No charts yet.\n\nClick  ＋ Add Chart  to get started."
-        )
+        self._content = QWidget()
+        self._content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._content_lay = QVBoxLayout(self._content)
+        self._content_lay.setContentsMargins(0, 0, 0, 0)
+        self._content_lay.setSpacing(4)
+        self._content_lay.addStretch(1)   # rows pile up from top; stretch fills remaining space
+
+        self._scroll.setWidget(self._content)
+        root.addWidget(self._scroll, 1)
+
+        # Empty-state placeholder
+        self._empty = QLabel("No charts yet.\n\nClick  \uff0b Add Chart  to get started.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setStyleSheet(
-            "font-size: 13px; padding: 60px; background: transparent;"
-        )
-        root.addWidget(self._empty, 1)
+        self._empty.setStyleSheet("font-size: 13px; color: inherit; background: transparent;")
+        # Overlay empty label over the scroll area
+        self._empty.setParent(self._scroll)
+        self._empty.hide()
 
-        # Hook toolbar buttons
         self._add_btn.clicked.connect(self._on_add)
         self._refresh_btn.clicked.connect(self.refresh_all)
         self._full_btn.clicked.connect(self._toggle_fullscreen)
 
         self._update_empty()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep empty label centred in the scroll area viewport
+        if self._empty.isVisible():
+            self._empty.setGeometry(0, 0,
+                                    self._scroll.width(),
+                                    self._scroll.height())
+
     # ── Styling helper ────────────────────────────────────────────────────────
 
     @staticmethod
     def _mk_ghost_btn(text: str, tip: str = "") -> QPushButton:
         b = QPushButton(text)
-        b.setFixedHeight(30)
+        b.setFixedHeight(26)
         b.setToolTip(tip)
         b.setStyleSheet(
-            "QPushButton { font-size: 14px; background: transparent; "
-            "  border: 1px solid rgba(128,128,128,0.4); border-radius: 7px; padding: 2px 10px; }"
+            "QPushButton { font-size: 13px; background: transparent;"
+            "  border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; padding: 2px 8px; }"
             "QPushButton:hover   { background: rgba(128,128,128,0.15); }"
             "QPushButton:pressed { background: rgba(128,128,128,0.3); }"
         )
@@ -383,17 +509,16 @@ class ChartBoard(QWidget):
         self._empty.hide()
 
     def add_panel(self, direction: str):
-        """Compat shim — open the add-chart dialog."""
         self._on_add()
 
     def move_focused(self, direction: str):
-        pass  # Moves are handled via the ⋯ card menu or drag-and-drop
+        pass
 
     def export_state(self) -> Dict[str, Any]:
         return {
-            "row_sizes": self._vsplit.sizes(),
             "rows": [
                 {
+                    "height": row.widget.height(),
                     "col_sizes": row.splitter.sizes(),
                     "charts": [it.spec.to_dict() for it in row.items],
                 }
@@ -407,7 +532,11 @@ class ChartBoard(QWidget):
             self._update_empty()
             return
 
-        for rdata in data.get("rows") or []:
+        # Back-compat: old format stored row_sizes at top level
+        rows_data = data.get("rows") or []
+        old_row_sizes = data.get("row_sizes") or []
+
+        for i, rdata in enumerate(rows_data):
             row = self._add_row()
             for sd in rdata.get("charts") or []:
                 try:
@@ -415,42 +544,46 @@ class ChartBoard(QWidget):
                     self._attach(row, spec)
                 except Exception:
                     pass
-            sizes = rdata.get("col_sizes")
-            if sizes and len(sizes) == row.splitter.count():
-                row.splitter.setSizes(list(map(int, sizes)))
-
-        rsz = data.get("row_sizes")
-        if rsz and len(rsz) == self._vsplit.count():
-            self._vsplit.setSizes(list(map(int, rsz)))
+            col_sizes = rdata.get("col_sizes")
+            if col_sizes and len(col_sizes) == row.splitter.count():
+                row.splitter.setSizes(list(map(int, col_sizes)))
+            # Restore saved row height
+            h = rdata.get("height")
+            if h:
+                row.widget.setFixedHeight(max(_RowWidget.MIN_H, int(h)))
+            elif old_row_sizes and i < len(old_row_sizes):
+                row.widget.setFixedHeight(max(_RowWidget.MIN_H, int(old_row_sizes[i])))
 
         self._update_empty()
 
     # ── Row management ────────────────────────────────────────────────────────
 
     def _add_row(self) -> _Row:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setObjectName("chart_row")
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(6)
-        self._vsplit.addWidget(splitter)
-        row = _Row(splitter=splitter)
+        rw = _RowWidget(self._content)
+        # Insert before the trailing stretch item
+        self._content_lay.insertWidget(self._content_lay.count() - 1, rw)
+        row = _Row(widget=rw)
         self.rows.append(row)
-        self._equalise_rows()
+        return row
+
+    def _insert_row_at(self, index: int) -> _Row:
+        rw = _RowWidget(self._content)
+        self._content_lay.insertWidget(index, rw)
+        row = _Row(widget=rw)
+        self.rows.insert(index, row)
         return row
 
     def _remove_row(self, ri: int):
         if not (0 <= ri < len(self.rows)):
             return
         row = self.rows.pop(ri)
-        row.splitter.setParent(None)
-        row.splitter.deleteLater()
-        self._equalise_rows()
+        row.widget.setParent(None)
+        row.widget.deleteLater()
         self._update_empty()
 
     # ── Card management ───────────────────────────────────────────────────────
 
     def _attach(self, row: _Row, spec: ChartSpec):
-        """Create a card for *spec*, append it to *row*."""
         card = self._make_card(spec)
         row.splitter.addWidget(card)
         row.items.append(_Item(spec=spec))
@@ -491,24 +624,15 @@ class ChartBoard(QWidget):
     # ── Core rebuild ──────────────────────────────────────────────────────────
 
     def _rebuild_row(self, row: _Row):
-        """
-        Detach every card from the splitter then re-add them in model order.
-
-        self._cards keeps a live Python reference so setParent(None) does NOT
-        destroy the widgets — it only un-parents them from the splitter.
-        """
         sizes = row.splitter.sizes()
-
         for i in range(row.splitter.count()):
             w = row.splitter.widget(i)
             if w is not None:
                 w.setParent(None)
-
         for it in row.items:
             card = self._cards.get(it.spec.id)
             if card is not None:
                 row.splitter.addWidget(card)
-
         if sizes and len(sizes) == row.splitter.count():
             row.splitter.setSizes(sizes)
         else:
@@ -579,25 +703,15 @@ class ChartBoard(QWidget):
         else:
             insert_at = ri if where == "above" else ri + 1
 
-        new_splitter = QSplitter(Qt.Orientation.Horizontal)
-        new_splitter.setObjectName("chart_row")
-        new_splitter.setChildrenCollapsible(False)
-        new_splitter.setHandleWidth(6)
-
-        new_row = _Row(splitter=new_splitter)
+        new_row = self._insert_row_at(insert_at)
         new_row.items.append(item)
-        self.rows.insert(insert_at, new_row)
-        self._vsplit.insertWidget(insert_at, new_splitter)
-
         card = self._cards.get(item.spec.id)
         if card is not None:
-            new_splitter.addWidget(card)
+            new_row.splitter.addWidget(card)
 
-        self._equalise_rows()
         self.changed.emit()
 
     def _on_drop(self, dragged_id: str, target_id: str):
-        """Move dragged card to sit immediately before the target card."""
         if dragged_id == target_id:
             return
         src_ri, src_ci = self._find(dragged_id)
@@ -610,19 +724,16 @@ class ChartBoard(QWidget):
         item    = src_row.items.pop(src_ci)
 
         if src_ri == dst_ri:
-            # Same row — adjust for removal
             adj_ci = dst_ci if dst_ci < src_ci else dst_ci - 1
             src_row.items.insert(adj_ci, item)
             self._rebuild_row(src_row)
         else:
-            # Different rows
             self._rebuild_row(src_row)
             if not src_row.items:
                 self._remove_row(src_ri)
                 if dst_ri > src_ri:
                     dst_ri -= 1
             dst_row = self.rows[dst_ri]
-            # Re-locate target index after possible row removal
             actual_dst_ci = next(
                 (ci for ci, it in enumerate(dst_row.items) if it.spec.id == target_id),
                 len(dst_row.items),
@@ -671,30 +782,28 @@ class ChartBoard(QWidget):
             card.deleteLater()
         self._cards.clear()
         for row in list(self.rows):
-            row.splitter.setParent(None)
-            row.splitter.deleteLater()
+            row.widget.setParent(None)
+            row.widget.deleteLater()
         self.rows.clear()
 
     def _update_empty(self):
         has_charts = any(r.items for r in self.rows)
-        self._vsplit.setVisible(has_charts)
+        self._scroll.setVisible(has_charts)
         self._empty.setVisible(not has_charts)
+        if not has_charts:
+            self._empty.setGeometry(0, 0, self._scroll.width(), self._scroll.height())
+            self._empty.raise_()
 
     def _equalise_cols(self, row: _Row):
         n = row.splitter.count()
         if n > 0:
             row.splitter.setSizes([10_000] * n)
 
-    def _equalise_rows(self):
-        n = self._vsplit.count()
-        if n > 0:
-            self._vsplit.setSizes([10_000] * n)
-
     def _toggle_fullscreen(self):
         w = self.window()
         if w.isFullScreen():
             w.showNormal()
-            self._full_btn.setText("⛶")
+            self._full_btn.setText("\u26f6")
         else:
             w.showFullScreen()
-            self._full_btn.setText("🗗")
+            self._full_btn.setText("\U0001f5d7")

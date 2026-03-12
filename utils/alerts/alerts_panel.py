@@ -97,6 +97,43 @@ def _status_pill_text(status: str, enabled: bool) -> str:
     return _PILL_TEXT.get((status or "OFF").upper(), status or "—")
 
 
+def _make_chart_icon(size: int = 22, color: str = "#ffffff"):
+    """Return a QIcon with a mini trend-line chart for the Inspect button."""
+    from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen
+    from PyQt6.QtCore import Qt, QPointF
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    col = QColor(color)
+    pad = 2
+    # Axes
+    ax_pen = QPen(col, 1.4)
+    ax_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(ax_pen)
+    p.drawLine(pad, pad, pad, size - pad)
+    p.drawLine(pad, size - pad, size - pad, size - pad)
+    # Trend line (generally rising left-to-right)
+    tr_pen = QPen(col, 1.8)
+    tr_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    tr_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(tr_pen)
+    inner = size - pad * 2 - 2
+    ox = pad + 2
+    oy_base = size - pad - 1
+    pts = [
+        QPointF(ox,               oy_base - inner * 0.15),
+        QPointF(ox + inner * 0.25, oy_base - inner * 0.40),
+        QPointF(ox + inner * 0.50, oy_base - inner * 0.55),
+        QPointF(ox + inner * 0.75, oy_base - inner * 0.75),
+        QPointF(ox + inner,        oy_base - inner * 0.90),
+    ]
+    for i in range(len(pts) - 1):
+        p.drawLine(pts[i], pts[i + 1])
+    p.end()
+    return QIcon(px)
+
+
 # ── Custom item roles ──────────────────────────────────────────────────────────
 _ROLE_ID       = Qt.ItemDataRole.UserRole        # spec.id
 _ROLE_HEX      = Qt.ItemDataRole.UserRole + 10   # status colour hex string
@@ -277,7 +314,7 @@ def _build_host(db_path: str, table: str) -> Optional[_LiteHost]:
 def _divider() -> QFrame:
     f = QFrame()
     f.setFrameShape(QFrame.Shape.HLine)
-    f.setStyleSheet("QFrame { border: none; border-top: 1px solid #e5e7eb; "
+    f.setStyleSheet("QFrame { border: none; border-top: 1px solid palette(mid); "
                     "background: transparent; border-radius: 0; }")
     return f
 
@@ -285,7 +322,7 @@ def _divider() -> QFrame:
 def _key_lbl(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(
-        "QLabel { font-weight: 600; color: #6b7280; font-size: 11px; "
+        "QLabel { font-weight: 600; font-size: 11px; "
         "background: transparent; border: none; border-radius: 0; }"
     )
     lbl.setFixedWidth(88)
@@ -296,7 +333,7 @@ def _val_lbl(text: str = "—") -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
     lbl.setStyleSheet(
-        "QLabel { font-weight: 400; color: #374151; font-size: 12px; "
+        "QLabel { font-weight: 400; font-size: 12px; "
         "background: transparent; border: none; border-radius: 0; }"
     )
     return lbl
@@ -332,11 +369,11 @@ class TableAlertsDialog(QDialog):
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
-        _icon_sz = 34
+        _icon_sz = 42
 
         def _btn_ss(bg, bg_h, bg_p, fg, border, border_h):
             return (
-                f"QPushButton {{ font-size: 15px; font-weight: 700; color: {fg}; "
+                f"QPushButton {{ font-size: 18px; font-weight: 700; color: {fg}; "
                 f"border: 1.5px solid {border}; border-radius: 8px; "
                 f"background: {bg}; padding: 0px; }}"
                 f"QPushButton:hover   {{ background: {bg_h}; border-color: {border_h}; }}"
@@ -364,11 +401,13 @@ class TableAlertsDialog(QDialog):
         self._cfg_btn.setToolTip("Configure selected")
         self._cfg_btn.setStyleSheet(_btn_ss("#475569","#334155","#1e293b","#ffffff","#334155","#1e293b"))
 
-        # ◳ Inspect — purple
-        self._view_btn = QPushButton("\u25F3", self)
+        # 📈 Inspect — purple  (custom trend-chart icon)
+        self._view_btn = QPushButton("", self)
         self._view_btn.setFixedSize(_icon_sz, _icon_sz)
         self._view_btn.setFlat(True)
         self._view_btn.setToolTip("Inspect / chart")
+        self._view_btn.setIcon(_make_chart_icon(22, "#ffffff"))
+        self._view_btn.setIconSize(QSize(22, 22))
         self._view_btn.setStyleSheet(_btn_ss("#7c3aed","#6d28d9","#5b21b6","#ffffff","#6d28d9","#5b21b6"))
 
         # ✓ Enable — green
@@ -459,7 +498,7 @@ class TableAlertsDialog(QDialog):
         hdr = QHBoxLayout()
         self._det_title = QLabel("Select an alert", self)
         self._det_title.setStyleSheet(
-            "QLabel { font-size: 14px; font-weight: 700; color: #111827; "
+            "QLabel { font-size: 14px; font-weight: 700; "
             "background: transparent; border: none; border-radius: 0; }"
         )
         hdr.addWidget(self._det_title, 1)
@@ -471,7 +510,7 @@ class TableAlertsDialog(QDialog):
         self._status_pill.setMinimumWidth(64)
         self._status_pill.setStyleSheet(
             "QLabel { font-size: 10px; font-weight: 700; border-radius: 12px; "
-            "background: #f3f4f6; color: #6b7280; "
+            "background: transparent; "
             "padding: 0 10px; border: none; }"
         )
         hdr.addWidget(self._status_pill)
@@ -779,7 +818,7 @@ class TableAlertsDialog(QDialog):
         self._det_title.setText("Select an alert")
         self._status_pill.setStyleSheet(
             "QLabel { font-size: 10px; font-weight: 700; border-radius: 12px; "
-            "background: #f3f4f6; color: #6b7280; padding: 0 10px; border: none; }"
+            "background: transparent; padding: 0 10px; border: none; }"
         )
         self._status_pill.setText("")
         for lbl in (self._det_kind, self._det_summary, self._det_rcpts,

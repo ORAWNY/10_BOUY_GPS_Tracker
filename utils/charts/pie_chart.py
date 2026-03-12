@@ -98,7 +98,7 @@ class PieRenderer(QWidget):
         super().showEvent(event)
         if not getattr(self, '_has_been_shown', False):
             self._has_been_shown = True
-            self.canvas.draw()
+            self.refresh_data()
 
     def refresh_data(self):
         df = self.get_df()

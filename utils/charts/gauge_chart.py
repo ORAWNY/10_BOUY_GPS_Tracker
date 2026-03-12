@@ -98,7 +98,7 @@ class GaugeRenderer(QWidget):
         super().showEvent(event)
         if not getattr(self, '_has_been_shown', False):
             self._has_been_shown = True
-            self.canvas.draw()
+            self.refresh_data()
 
     def _calc_value(self, df: pd.DataFrame, p: Dict[str, Any]) -> float:
         col = p.get("value_col", "")
