@@ -31,6 +31,7 @@ from utils.alerts.store import (
 from utils.alerts.emailer import send_email_outlook
 from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts.view_helpers import enrich_extra_for_log
+from utils.constants import is_battery_column
 
 
 # ------------------------- alert chart helper -------------------------
@@ -287,6 +288,8 @@ class AlertsTab(QWidget):
         self.specs: List[AlertSpec] = []
         self._next_due: dict[str, datetime] = {}        # per-alert next evaluation time (UTC)
         self._skip_logged_until: dict[str, datetime] = {}  # per-alert "email:skipped" mute-until
+        # Battery columns explicitly removed by the user — never auto-recreated
+        self._dismissed_battery_cols: set[str] = set()
 
         # ================= UI =================
         root = QVBoxLayout(self)
@@ -1123,6 +1126,13 @@ class AlertsTab(QWidget):
         self.refresh_table()
 
     def delete_spec(self, spec: AlertSpec):
+        # If the user removes a battery alert, remember the column so the
+        # summary page does not auto-recreate it on the next refresh.
+        p = spec.payload or {}
+        if p.get("is_battery") or is_battery_column(str(p.get("column", ""))):
+            col = str(p.get("column", ""))
+            if col:
+                self._dismissed_battery_cols.add(col)
         self.specs = [s for s in self.specs if s.id != spec.id]
         self._persist_current_settings()
         write_settings_audit(self.db_path, self.host.table_name, "deleted", json.dumps(spec.to_dict(), ensure_ascii=False))
@@ -1495,9 +1505,10 @@ class AlertsTab(QWidget):
     def export_settings(self) -> dict:
         return {
             "table": self.host.table_name,
-            "version": 6,  # bumped for toolbar overhaul + minutes timer
+            "version": 7,  # bumped for dismissed_battery_cols
             "items": [s.to_dict() for s in self.specs],
             "timer_min": int(max(1, getattr(self, "_timer_min", 5))),
+            "dismissed_battery_cols": sorted(self._dismissed_battery_cols),
         }
 
     def import_settings(self, data: dict):
@@ -1512,6 +1523,9 @@ class AlertsTab(QWidget):
         self.timer.setInterval(max(60_000, int(self._timer_min) * 60_000))
 
         self.specs = [AlertSpec.from_dict(d) for d in data.get("items", [])]
+        # Restore dismissed battery columns so auto-registration skips them.
+        dismissed = data.get("dismissed_battery_cols", [])
+        self._dismissed_battery_cols = set(dismissed) if isinstance(dismissed, list) else set()
         # Purge any orphaned state rows so badge and checkboxes match the current set.
         try:
             purge_orphaned_alert_state(self.db_path, self.host.table_name, [s.id for s in self.specs if s.id])

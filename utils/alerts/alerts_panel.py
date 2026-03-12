@@ -356,10 +356,14 @@ class TableAlertsDialog(QDialog):
         self._host: Optional[_LiteHost] = None
         self._specs: List[AlertSpec] = load_specs(db_path, table_name)
         self._timer_min = 5
+        self._dismissed_battery_cols: set = set()
         from utils.alerts.store import read_current_settings
         saved = read_current_settings(db_path, table_name)
         if isinstance(saved, dict):
             self._timer_min = int(saved.get("timer_min", 5))
+            dismissed = saved.get("dismissed_battery_cols", [])
+            if isinstance(dismissed, list):
+                self._dismissed_battery_cols = set(dismissed)
 
         outer = QVBoxLayout(self)
         outer.setSpacing(10)
@@ -617,7 +621,8 @@ class TableAlertsDialog(QDialog):
         return None
 
     def _save(self):
-        save_specs(self.db_path, self.table_name, self._specs, self._timer_min)
+        save_specs(self.db_path, self.table_name, self._specs, self._timer_min,
+                   dismissed_battery_cols=list(self._dismissed_battery_cols))
         self._sync_alerts_tab()
 
     def _sync_alerts_tab(self):
@@ -667,6 +672,14 @@ class TableAlertsDialog(QDialog):
             f"Remove '{spec.name or spec.kind}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes:
+            # Track dismissed battery columns so auto-registration skips them
+            p = spec.payload or {}
+            if spec.kind == "Threshold" and (
+                bool(p.get("is_battery")) or is_battery_column(str(p.get("column", "")))
+            ):
+                col = str(p.get("column", ""))
+                if col:
+                    self._dismissed_battery_cols.add(col)
             self._specs.remove(spec)
             self._save()
             self._refresh_list()

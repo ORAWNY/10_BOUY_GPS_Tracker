@@ -36,13 +36,23 @@ def save_specs(
     table_name: str,
     specs: List[AlertSpec],
     timer_min: int = 5,
+    dismissed_battery_cols: list | None = None,
 ) -> None:
     """Persist *specs* for *table_name* to the state sidecar DB."""
+    # Preserve dismissed_battery_cols from existing settings when not supplied
+    if dismissed_battery_cols is None:
+        try:
+            existing = read_current_settings(db_path, table_name)
+            if isinstance(existing, dict):
+                dismissed_battery_cols = existing.get("dismissed_battery_cols", [])
+        except Exception:
+            pass
     payload = {
         "table": table_name,
-        "version": 6,
+        "version": 7,
         "items": [s.to_dict() for s in specs],
         "timer_min": timer_min,
+        "dismissed_battery_cols": sorted(set(dismissed_battery_cols or [])),
     }
     write_current_settings(
         db_path, table_name, json.dumps(payload, ensure_ascii=False)

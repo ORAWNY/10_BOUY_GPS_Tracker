@@ -36,7 +36,7 @@ from utils.time_settings import local_zone, parse_series_to_local_naive
 from utils.alerts import REGISTRY, AlertSpec
 from utils.alerts import summary_stale_alerts as stale_mod
 from utils.alerts.evaluator import load_specs, save_specs
-from utils.alerts.store import ensure_alerts_tables, read_last_status, read_last_observed
+from utils.alerts.store import ensure_alerts_tables, read_last_status, read_last_observed, read_current_settings
 from utils.constants import is_battery_column
 
 # Force registration of the Stale handler (ensures REGISTRY["Stale"] exists)
@@ -1380,6 +1380,20 @@ class SummaryPage(QWidget):
         battery_specs = [s for s in specs if self._spec_is_battery(s)]
         alerted_cols  = {str(s.payload.get("column", "")) for s in battery_specs}
 
+        # Read the set of battery columns the user has deliberately removed so
+        # we do not recreate them on every refresh.
+        dismissed_cols: set = set()
+        try:
+            raw_settings = read_current_settings(self.db_path, table)
+            if raw_settings:
+                import json as _json
+                saved = _json.loads(raw_settings) if isinstance(raw_settings, str) else raw_settings
+                dismissed = saved.get("dismissed_battery_cols", [])
+                if isinstance(dismissed, list):
+                    dismissed_cols = set(dismissed)
+        except Exception:
+            pass
+
         needs_save = False
         result = []
         try:
@@ -1391,7 +1405,7 @@ class SummaryPage(QWidget):
                 all_cols  = _table_columns(conn, table)
                 auto_cols = sorted(
                     c for c in all_cols
-                    if is_battery_column(c) and c not in alerted_cols
+                    if is_battery_column(c) and c not in alerted_cols and c not in dismissed_cols
                 )
                 for col in auto_cols:
                     new_spec = AlertSpec(
