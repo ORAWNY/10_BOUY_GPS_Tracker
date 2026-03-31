@@ -10,6 +10,7 @@ import json
 import sqlite3
 import hashlib
 import time
+import fnmatch
 from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import List, Callable, Optional, Dict, Any, Sequence, Tuple
@@ -165,6 +166,26 @@ class EmailParserConfig:
     ftp_delete_local_after_upload: bool = False  # if True, delete local files after upload
     ftp_make_vrf_files: bool = False   # NEW: if True (and txt + FTP), create .vrf alongside each .txt
 
+    # --- BDC Backup source ---
+    bdc_backup_enabled: bool = False
+    bdc_backup_folder: str = ""
+
+    # --- CSV source ---
+    csv_source_enabled: bool = False
+    csv_source_folder: str = ""
+    csv_source_config: str = ""        # optional per-pattern config JSON
+    csv_xyz: str = ""
+    csv_tag: str = ""
+    csv_k1: str = "K1"
+    csv_m2: str = "MW"
+    csv_battery_label: str = "Battery"
+    csv_battery_value: str = "12.0"
+    csv_timestamp_col: str = "timestamp"
+    csv_timestamp_format: str = "auto"
+    csv_skip_cols: str = ""
+    csv_skip_nan: bool = True
+    csv_seq_start: int = 1
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -274,6 +295,26 @@ class EmailParserConfig:
             ftp_check_on_start=bool(d.get("ftp_check_on_start", True)),
             ftp_delete_local_after_upload=bool(d.get("ftp_delete_local_after_upload", False)),
             ftp_make_vrf_files=bool(d.get("ftp_make_vrf_files", False)),
+
+            # --- BDC Backup source ---
+            bdc_backup_enabled=bool(d.get("bdc_backup_enabled", False)),
+            bdc_backup_folder=d.get("bdc_backup_folder", ""),
+
+            # --- CSV source ---
+            csv_source_enabled=bool(d.get("csv_source_enabled", False)),
+            csv_source_folder=d.get("csv_source_folder", ""),
+            csv_source_config=d.get("csv_source_config", ""),
+            csv_xyz=d.get("csv_xyz", ""),
+            csv_tag=d.get("csv_tag", ""),
+            csv_k1=d.get("csv_k1", "K1"),
+            csv_m2=d.get("csv_m2", "MW"),
+            csv_battery_label=d.get("csv_battery_label", "Battery"),
+            csv_battery_value=d.get("csv_battery_value", "12.0"),
+            csv_timestamp_col=d.get("csv_timestamp_col", "timestamp"),
+            csv_timestamp_format=d.get("csv_timestamp_format", "auto"),
+            csv_skip_cols=d.get("csv_skip_cols", ""),
+            csv_skip_nan=bool(d.get("csv_skip_nan", True)),
+            csv_seq_start=int(d.get("csv_seq_start", 1)),
         )
 
 
@@ -1185,6 +1226,369 @@ def _ensure_vrf_for_txt(txt_path: str) -> str:
     return vrf_path
 
 
+# --------------------- BDC Backup source ---------------------
+
+def _extract_bdc_sender(message: str) -> str:
+    """Extract the TAG field from a #D line (position ##+2) to use as the lookup key."""
+    for raw in (message or "").splitlines():
+        line = raw.strip().strip('"').strip("'")
+        m = PAYLOAD_RE.match(line)
+        if not m:
+            continue
+        tag = m.group(1)
+        if tag != "D":
+            continue
+        rest = m.group(2)
+        toks = [t.strip() for t in rest.split(",")]
+        try:
+            i_hash = toks.index("##")
+            if i_hash + 2 < len(toks):
+                return toks[i_hash + 2]  # TAG field
+        except ValueError:
+            pass
+    return "bdc-backup"
+
+
+def _parse_bdc_json_records(content: str) -> List[Dict[str, Any]]:
+    """
+    Parse comma-separated JSON objects, with or without outer [].
+    Returns list of dicts.
+    """
+    content = content.strip()
+    if content.startswith("["):
+        try:
+            return json.loads(content)
+        except Exception:
+            pass
+        # strip brackets and fall through
+        content = content[1:]
+        if content.endswith("]"):
+            content = content[:-1]
+
+    # Split on },{
+    records = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(content):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                chunk = content[start:i + 1].strip()
+                try:
+                    records.append(json.loads(chunk))
+                except Exception:
+                    pass
+    return records
+
+
+def _bdc_backup_iter_messages(
+    cfg: "EmailParserConfig",
+    folder_tag: str,
+    dt_cutoff: Optional[datetime],
+    logger: Optional[Callable[[str], None]],
+) -> List[Any]:
+    """Read .txt BDC backup files and return _MailRecord list (newest→oldest)."""
+
+    @dataclass
+    class _MailRecord:
+        subject: str
+        sender: str
+        received_time: str
+        body: str
+        entry_id: str
+
+    def log(msg: str):
+        if logger:
+            logger(msg)
+
+    folder = (cfg.bdc_backup_folder or "").strip()
+    if not folder or not os.path.isdir(folder):
+        log(f"BDC backup folder not found: {folder!r}")
+        return []
+
+    recs: List[_MailRecord] = []
+    for fname in sorted(os.listdir(folder)):
+        if not fname.lower().endswith(".txt"):
+            continue
+        fpath = os.path.join(folder, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            log(f"BDC backup: cannot read {fname}: {e}")
+            continue
+
+        records = _parse_bdc_json_records(content)
+        log(f"BDC backup: {fname} -> {len(records)} records")
+
+        for rec in records:
+            status = str(rec.get("status", "")).lower()
+            if status not in ("failed", "pending"):
+                continue
+
+            message = str(rec.get("message", "")).strip()
+            if not message:
+                continue
+
+            rec_id = str(rec.get("id", "")).strip()
+            added_str = str(rec.get("added", "")).strip()
+
+            # Parse received_time from "added" field (ISO format)
+            received_time = ""
+            if added_str:
+                try:
+                    dt = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
+                    received_time = dt.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    received_time = added_str[:19].replace("T", " ")
+
+            if not received_time:
+                received_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Apply cutoff filter
+            if dt_cutoff is not None and received_time:
+                try:
+                    dt_rec = datetime.strptime(received_time, "%Y-%m-%d %H:%M:%S")
+                    if dt_rec < dt_cutoff:
+                        continue
+                except Exception:
+                    pass
+
+            sender = _extract_bdc_sender(message)
+            subject = f"BDC:{rec_id}" if rec_id else f"BDC:{status}"
+            entry_id = rec_id or f"BDC:{fname}:{added_str}"
+
+            recs.append(_MailRecord(
+                subject=subject,
+                sender=sender,
+                received_time=received_time,
+                body=message,
+                entry_id=entry_id,
+            ))
+
+    recs.sort(key=lambda r: r.received_time, reverse=True)
+    return recs
+
+
+# --------------------- CSV source ---------------------
+
+_CSV_TS_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%Y%m%d%H%M%S",
+]
+
+_CSV_NAN_VALUES = {"", "nan", "NaN", "NAN", "n/a", "N/A", "NA", "null", "NULL", "None", "none", "#N/A", "#NA"}
+
+
+def _parse_csv_ts(value: str, fmt: str) -> Optional[tuple]:
+    """
+    Returns (datetime, ts12_str) or None if unparseable.
+    fmt="auto" tries _CSV_TS_FORMATS in order.
+    ts12 is YYMMDDHHMMSS.
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    formats = _CSV_TS_FORMATS if fmt.lower() == "auto" else [fmt]
+    for f in formats:
+        try:
+            dt = datetime.strptime(v, f)
+            ts12 = dt.strftime("%y%m%d%H%M%S")
+            return dt, ts12
+        except Exception:
+            continue
+    return None
+
+
+def _sanitize_d_key(name: str) -> str:
+    """Remove characters that would break #D CSV format."""
+    return re.sub(r"[,*]+", "_", (name or "").strip())
+
+
+def _load_csv_header_cfg(config_path: str, filename: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Load per-pattern config JSON for a given filename.
+    JSON structure:
+      {
+        "*.csv": { "xyz": "EW1", "tag": "SBC1W", ... },
+        "Alpha_*.csv": { "xyz": "AL", "tag": "ALPHA" },
+        "default": { ... }
+      }
+    Keys are fnmatch patterns checked in order; "default" is fallback.
+    Returns merged dict: defaults overridden by matched section.
+    """
+    if not config_path or not os.path.isfile(config_path):
+        return dict(defaults)
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        if not isinstance(blob, dict):
+            return dict(defaults)
+        # Try patterns in order (skip "default")
+        for pattern, section in blob.items():
+            if pattern == "default":
+                continue
+            if fnmatch.fnmatch(filename, pattern):
+                merged = dict(defaults)
+                if isinstance(section, dict):
+                    merged.update({k: v for k, v in section.items() if v is not None and v != ""})
+                return merged
+        # Fallback to "default" key
+        if "default" in blob and isinstance(blob["default"], dict):
+            merged = dict(defaults)
+            merged.update({k: v for k, v in blob["default"].items() if v is not None and v != ""})
+            return merged
+    except Exception:
+        pass
+    return dict(defaults)
+
+
+def _csv_source_iter_messages(
+    cfg: "EmailParserConfig",
+    folder_tag: str,
+    dt_cutoff: Optional[datetime],
+    logger: Optional[Callable[[str], None]],
+) -> List[Any]:
+    """Read .csv files from csv_source_folder and build #D _MailRecord list (newest→oldest)."""
+
+    @dataclass
+    class _MailRecord:
+        subject: str
+        sender: str
+        received_time: str
+        body: str
+        entry_id: str
+
+    def log(msg: str):
+        if logger:
+            logger(msg)
+
+    folder = (cfg.csv_source_folder or "").strip()
+    if not folder or not os.path.isdir(folder):
+        log(f"CSV source folder not found: {folder!r}")
+        return []
+
+    # Build defaults from cfg
+    cfg_defaults = {
+        "xyz": cfg.csv_xyz or "",
+        "tag": cfg.csv_tag or "",
+        "k1": cfg.csv_k1 or "K1",
+        "m2": cfg.csv_m2 or "MW",
+        "battery_label": cfg.csv_battery_label or "Battery",
+        "battery_value": cfg.csv_battery_value or "12.0",
+        "timestamp_col": cfg.csv_timestamp_col or "timestamp",
+        "timestamp_format": cfg.csv_timestamp_format or "auto",
+        "skip_cols": cfg.csv_skip_cols or "",
+        "skip_nan": cfg.csv_skip_nan,
+        "seq_start": int(cfg.csv_seq_start or 1),
+    }
+
+    skip_cols_global = {s.strip() for s in (cfg.csv_skip_cols or "").split(",") if s.strip()}
+
+    recs = []
+
+    for fname in sorted(os.listdir(folder)):
+        if not fname.lower().endswith(".csv"):
+            continue
+        fpath = os.path.join(folder, fname)
+
+        # Load per-pattern overrides
+        h = _load_csv_header_cfg(cfg.csv_source_config, fname, cfg_defaults)
+
+        xyz = str(h.get("xyz", "") or "")
+        tag = str(h.get("tag", "") or "")
+        k1 = str(h.get("k1", "K1") or "K1")
+        m2 = str(h.get("m2", "MW") or "MW")
+        bat_lbl = str(h.get("battery_label", "Battery") or "Battery")
+        bat_val = str(h.get("battery_value", "12.0") or "12.0")
+        ts_col = str(h.get("timestamp_col", "timestamp") or "timestamp")
+        ts_fmt = str(h.get("timestamp_format", "auto") or "auto")
+        skip_nan = bool(h.get("skip_nan", True))
+        seq = int(h.get("seq_start", 1) or 1)
+
+        # Build skip set for this file
+        skip_extra = str(h.get("skip_cols", "") or "")
+        skip_cols = set(skip_cols_global)
+        for s in skip_extra.split(","):
+            s = s.strip()
+            if s:
+                skip_cols.add(s)
+
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace", newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+        except Exception as e:
+            log(f"CSV source: cannot read {fname}: {e}")
+            continue
+
+        log(f"CSV source: {fname} -> {len(rows)} rows")
+
+        for row in rows:
+            ts_raw = str(row.get(ts_col, "") or "").strip()
+            parsed = _parse_csv_ts(ts_raw, ts_fmt)
+            if parsed is None:
+                continue
+            dt_row, ts12 = parsed
+
+            # Cutoff filter
+            if dt_cutoff is not None and dt_row < dt_cutoff:
+                continue
+
+            received_time = dt_row.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Build key-value pairs
+            kv_parts = []
+            for col, val in row.items():
+                if col is None:
+                    continue
+                col_s = str(col).strip()
+                if not col_s:
+                    continue
+                if col_s == ts_col:
+                    continue
+                if col_s in skip_cols:
+                    continue
+                val_s = str(val).strip() if val is not None else ""
+                if skip_nan and val_s in _CSV_NAN_VALUES:
+                    continue
+                key = _sanitize_d_key(col_s)
+                kv_parts.append(key)
+                kv_parts.append(val_s)
+
+            d_parts = (
+                ["#D", str(seq), "##", xyz, tag, k1, k1, m2, m2, ts12, bat_lbl, bat_val]
+                + kv_parts
+            )
+            body = ",".join(d_parts)
+
+            entry_id = f"CSV:{fname}:{ts_raw}:{seq}"
+            subject = f"CSV:{fname}:{ts12}"
+            sender = tag if tag else fname
+
+            recs.append(_MailRecord(
+                subject=subject,
+                sender=sender,
+                received_time=received_time,
+                body=body,
+                entry_id=entry_id,
+            ))
+            seq += 1
+
+    recs.sort(key=lambda r: r.received_time, reverse=True)
+    return recs
+
+
 # --------------------- Runner ---------------------
 def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     def log(msg: str):
@@ -1244,6 +1648,9 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
         )
 
     use_webhook = bool(getattr(cfg, "webhook_enabled", False))
+    use_bdc = bool(getattr(cfg, "bdc_backup_enabled", False))
+    use_csv = bool(getattr(cfg, "csv_source_enabled", False))
+    _use_messages = use_webhook or use_bdc or use_csv
 
     # Optional FTP pre-check
     ftp_session: Optional[FTPSession] = None
@@ -1256,9 +1663,9 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             else:
                 log(f"FTP connection check failed: {err}")
 
-    # Email mailbox handle if not webhook — select backend based on source_type
+    # Email mailbox handle if not a file/webhook source — select backend based on source_type
     _use_imap = (getattr(cfg, "source_type", "outlook") or "outlook").lower() == "imap"
-    if not use_webhook:
+    if not _use_messages:
         if _use_imap:
             from utils.Email_parser import email_parser_imap as _imap_mod
             _imap_mod.configure(
@@ -1399,9 +1806,25 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             if use_webhook:
                 try:
                     messages = _webhook_iter_messages(cfg, folder_tag, dt_cutoff, logger)
-                    log(f"Polling WEBHOOK {cfg.webhook_url} | {len(messages)} items (newest→oldest)")
+                    log(f"Polling WEBHOOK {cfg.webhook_url} | {len(messages)} items (newest->oldest)")
                 except Exception as e:
                     log(f"Webhook fetch failed: {e}")
+                    results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
+                    continue
+            elif use_bdc:
+                try:
+                    messages = _bdc_backup_iter_messages(cfg, folder_tag, dt_cutoff, logger)
+                    log(f"BDC backup folder {cfg.bdc_backup_folder} | {len(messages)} messages")
+                except Exception as e:
+                    log(f"BDC backup read failed: {e}")
+                    results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
+                    continue
+            elif use_csv:
+                try:
+                    messages = _csv_source_iter_messages(cfg, folder_tag, dt_cutoff, logger)
+                    log(f"CSV source folder {cfg.csv_source_folder} | {len(messages)} messages")
+                except Exception as e:
+                    log(f"CSV source read failed: {e}")
                     results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
                     continue
             else:
@@ -1440,9 +1863,16 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 except Exception:
                     pass
 
-            iterable = messages if use_webhook else items
-            count = len(messages) if use_webhook else getattr(items, "Count", -1)
-            source_label = "WEBHOOK" if use_webhook else cfg.mailbox
+            iterable = messages if _use_messages else items
+            count = len(messages) if _use_messages else getattr(items, "Count", -1)
+            if use_webhook:
+                source_label = "WEBHOOK"
+            elif use_bdc:
+                source_label = "BDC_BACKUP"
+            elif use_csv:
+                source_label = "CSV_SOURCE"
+            else:
+                source_label = cfg.mailbox
             log(f"Scanning {source_label} > " + " > ".join(path) + (f" | {count} items" if isinstance(count, int) and count >= 0 else ""))
 
             inserted = 0
@@ -1460,8 +1890,8 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 exported_any_for_message = False
                 entry_id = ""
                 try:
-                    if use_webhook:
-                        # msg is _MailRecord from webhook iterator
+                    if _use_messages:
+                        # msg is a _MailRecord (webhook / BDC backup / CSV source)
                         subject = msg.subject or ""
                         sender_name = msg.sender or ""
                         sender_email = msg.sender or ""
