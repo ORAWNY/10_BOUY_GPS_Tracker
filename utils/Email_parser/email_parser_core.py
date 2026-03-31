@@ -20,6 +20,7 @@ import shutil
 import base64
 import zlib
 import binascii
+import fnmatch
 
 
 try:
@@ -274,6 +275,26 @@ class EmailParserConfig:
     webhook_limit_param: str = "limit"  # optional page size param name
     webhook_limit: int = 200
 
+    # --- BDC backup file source ---
+    bdc_backup_enabled: bool = False
+    bdc_backup_folder: str = ""  # folder containing .txt backup queue files
+
+    # --- CSV file source ---
+    csv_source_enabled: bool = False
+    csv_source_folder: str = ""        # folder containing .csv files to convert
+    csv_source_config: str = ""        # optional JSON mapping file patterns → header settings
+    csv_xyz: str = ""                  # e.g. "EW1"  (position after ##)
+    csv_tag: str = ""                  # e.g. "SBC1W" (device tag; also used as lookup sender)
+    csv_k1: str = "K1"
+    csv_m2: str = "MW"
+    csv_battery_label: str = "Battery"
+    csv_battery_value: str = "12.0"
+    csv_timestamp_col: str = "timestamp"
+    csv_timestamp_format: str = "auto"  # "auto" or explicit strptime string
+    csv_skip_cols: str = ""             # comma-separated column names to exclude
+    csv_skip_nan: bool = True           # True = omit NaN/empty columns from the #D line
+    csv_seq_start: int = 1              # starting sequence number
+
     # --- Manual range / checkpoint control ---
     manual_from: str = ""  # "YYYY-MM-DD HH:MM:SS" (local)
     manual_to: str = ""  # "YYYY-MM-DD HH:MM:SS" (local); empty = up to now
@@ -378,6 +399,24 @@ class EmailParserConfig:
             webhook_since_param=d.get("webhook_since_param", "since"),
             webhook_limit_param=d.get("webhook_limit_param", "limit"),
             webhook_limit=int(d.get("webhook_limit", 200)),
+
+            bdc_backup_enabled=bool(d.get("bdc_backup_enabled", False)),
+            bdc_backup_folder=d.get("bdc_backup_folder", ""),
+
+            csv_source_enabled=bool(d.get("csv_source_enabled", False)),
+            csv_source_folder=d.get("csv_source_folder", ""),
+            csv_source_config=d.get("csv_source_config", ""),
+            csv_xyz=d.get("csv_xyz", ""),
+            csv_tag=d.get("csv_tag", ""),
+            csv_k1=d.get("csv_k1", "K1"),
+            csv_m2=d.get("csv_m2", "MW"),
+            csv_battery_label=d.get("csv_battery_label", "Battery"),
+            csv_battery_value=d.get("csv_battery_value", "12.0"),
+            csv_timestamp_col=d.get("csv_timestamp_col", "timestamp"),
+            csv_timestamp_format=d.get("csv_timestamp_format", "auto"),
+            csv_skip_cols=d.get("csv_skip_cols", ""),
+            csv_skip_nan=bool(d.get("csv_skip_nan", True)),
+            csv_seq_start=int(d.get("csv_seq_start", 1) or 1),
 
             # --- Manual range / checkpoint control ---
             manual_from=d.get("manual_from", ""),
@@ -603,6 +642,370 @@ def _webhook_iter_messages(cfg: EmailParserConfig, folder_tag: str, dt_cutoff: O
             out.append(r)
         return out
 
+    return recs
+
+
+def _extract_bdc_sender(message: str) -> str:
+    """
+    Derive a lookup-compatible sender key from a #D payload line.
+    The #D format is: #D,seq,##,XYZ,TAG,K1,K1,M2,M2,timestamp,...
+    We return the TAG token (after ##) so users can name their lookup
+    files after the device tag (e.g. SBC1W.json) and have them matched
+    the same way real email senders are matched.
+    Falls back to 'bdc-backup@local' if TAG cannot be found.
+    """
+    parts = message.split(",")
+    try:
+        i = parts.index("##")
+        if i + 2 < len(parts):
+            tag = parts[i + 2].strip()
+            if tag:
+                return tag
+    except ValueError:
+        pass
+    return "bdc-backup@local"
+
+
+def _parse_bdc_json_records(content: str) -> List[Dict[str, Any]]:
+    """
+    Parse a BDC backup queue file as a sequence of JSON objects.
+    The file is a comma-separated list of objects, optionally wrapped in [ ].
+    """
+    records: List[Dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    text = content.strip()
+    if text.startswith("["):
+        text = text[1:]
+    if text.endswith("]"):
+        text = text[:-1]
+    pos = 0
+    while pos < len(text):
+        # skip whitespace and commas between objects
+        while pos < len(text) and text[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(text):
+            break
+        try:
+            obj, end = decoder.raw_decode(text[pos:])
+            if isinstance(obj, dict):
+                records.append(obj)
+            pos += end
+        except Exception:
+            break
+    return records
+
+
+def _bdc_backup_iter_messages(
+    cfg: "EmailParserConfig",
+    folder_tag: str,
+    dt_cutoff: Optional[datetime],
+    logger: Optional[Callable[[str], None]],
+) -> List[Any]:
+    """
+    Read all .txt BDC backup queue files from cfg.bdc_backup_folder,
+    parse each JSON record, and return a list of _MailRecord objects
+    sorted newest → oldest by the 'added' timestamp.
+    Only records with status 'failed' or 'pending' are included.
+    """
+
+    @dataclass
+    class _MailRecord:
+        subject: str
+        sender: str
+        received_time: str
+        body: str
+        entry_id: str
+
+    def log(msg: str):
+        if logger:
+            logger(msg)
+
+    folder = (cfg.bdc_backup_folder or "").strip()
+    if not folder or not os.path.isdir(folder):
+        log(f"BDC backup folder not found or not set: {folder!r}")
+        return []
+
+    recs: List[_MailRecord] = []
+    txt_files = sorted(f for f in os.listdir(folder) if f.lower().endswith(".txt"))
+    log(f"BDC backup: scanning {len(txt_files)} .txt file(s) in {folder!r}")
+
+    for fname in txt_files:
+        fpath = os.path.join(folder, fname)
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+            raw_records = _parse_bdc_json_records(content)
+        except Exception as e:
+            log(f"BDC backup: failed to read {fname}: {e}")
+            continue
+
+        for rec in raw_records:
+            status = (rec.get("status") or "").lower()
+            if status not in ("failed", "pending"):
+                continue
+            message = (rec.get("message") or "").strip()
+            if not message:
+                continue
+
+            added_iso = rec.get("added") or ""
+            received_time = _parse_iso_to_local_str(added_iso) if added_iso else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entry_id = rec.get("id") or ""
+            subject = f"BDC-{entry_id}" if entry_id else "BDC backup"
+            sender = _extract_bdc_sender(message)
+
+            recs.append(_MailRecord(
+                subject=subject,
+                sender=sender,
+                received_time=received_time,
+                body=message,
+                entry_id=entry_id,
+            ))
+
+    # Sort newest first so checkpoint logic works correctly
+    recs.sort(key=lambda r: r.received_time, reverse=True)
+
+    # Apply lower time bound
+    if dt_cutoff is not None:
+        filtered = []
+        for r in recs:
+            try:
+                if datetime.strptime(r.received_time, "%Y-%m-%d %H:%M:%S") >= dt_cutoff:
+                    filtered.append(r)
+            except Exception:
+                filtered.append(r)
+        recs = filtered
+
+    log(f"BDC backup: {len(recs)} record(s) after filtering")
+    return recs
+
+
+# ───────────────────── CSV file source helpers ─────────────────────
+
+_CSV_TS_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d/%m/%Y",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+]
+
+_CSV_NAN_VALUES = {"", "nan", "NaN", "NAN", "none", "None", "null", "NULL", "n/a", "N/A", "NA"}
+
+
+def _parse_csv_ts(value: str, fmt: str) -> Tuple[Optional[datetime], str]:
+    """
+    Parse a CSV timestamp string → (datetime, ts12).
+    ts12 format is YYMMDDHHMMSS (12 digits, zero-padded to seconds).
+    Returns (None, "") when unparseable.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None, ""
+    candidates = _CSV_TS_FORMATS if fmt == "auto" else [fmt]
+    for f in candidates:
+        try:
+            dt = datetime.strptime(value, f)
+            return dt, dt.strftime("%y%m%d%H%M%S")
+        except ValueError:
+            continue
+    return None, ""
+
+
+def _sanitize_d_key(name: str) -> str:
+    """Sanitize a CSV column name so it is safe as a key in a #D line."""
+    name = (name or "").strip()
+    # commas are the #D delimiter; replace them and the ** terminator
+    name = name.replace(",", "_").replace("**", "__")
+    # collapse whitespace
+    name = re.sub(r"\s+", "_", name)
+    return name or "col"
+
+
+def _load_csv_header_cfg(config_path: str, filename: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Load per-file header settings from an optional JSON mapping config.
+
+    Config format:
+    {
+      "patterns": [
+        { "match": "GR-FLS-001_*", "xyz": "GR1", "tag": "FLS001", ... },
+        { "match": "*_10min.csv",  "tag": "10M", ... }
+      ],
+      "default": { "xyz": "EW1", "tag": "SBC1W", ... }
+    }
+
+    First matching pattern wins; falls back to "default" key, then to the
+    caller-supplied defaults dict.
+    """
+    cfg = dict(defaults)
+
+    if not config_path or not os.path.isfile(config_path):
+        return cfg
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return cfg
+
+    # Apply "default" overrides first (lowest priority from file)
+    if isinstance(data.get("default"), dict):
+        cfg.update({k: v for k, v in data["default"].items() if k not in ("match", "pattern")})
+
+    # Then try each pattern (first match wins, overrides defaults)
+    for pat in (data.get("patterns") or []):
+        match_glob = (pat.get("match") or pat.get("pattern") or "").strip()
+        if match_glob and fnmatch.fnmatch(filename, match_glob):
+            cfg.update({k: v for k, v in pat.items() if k not in ("match", "pattern")})
+            break
+
+    return cfg
+
+
+def _csv_source_iter_messages(
+    cfg: "EmailParserConfig",
+    folder_tag: str,
+    dt_cutoff: Optional[datetime],
+    logger: Optional[Callable[[str], None]],
+) -> List[Any]:
+    """
+    Read all .csv files from cfg.csv_source_folder, convert each data row into a
+    _MailRecord whose body is a #D payload line, and return them sorted newest→oldest.
+
+    The #D line structure is:
+        #D,{seq},##,{xyz},{tag},{k1},{k1},{m2},{m2},{ts12},{battery_label},{battery_value},
+            {col1},{val1},{col2},{val2},...
+
+    Header fields (xyz, tag, k1, m2, battery_label/value) come from the config.
+    Each non-timestamp, non-skipped column with a non-NaN value becomes a key-value pair.
+    """
+
+    @dataclass
+    class _MailRecord:
+        subject: str
+        sender: str
+        received_time: str
+        body: str
+        entry_id: str
+
+    def log(msg: str):
+        if logger:
+            logger(msg)
+
+    folder = (cfg.csv_source_folder or "").strip()
+    if not folder or not os.path.isdir(folder):
+        log(f"CSV source folder not found or not set: {folder!r}")
+        return []
+
+    # Build defaults from top-level config fields
+    defaults: Dict[str, Any] = {
+        "xyz":             getattr(cfg, "csv_xyz",           "") or "",
+        "tag":             getattr(cfg, "csv_tag",           "") or "",
+        "k1":              getattr(cfg, "csv_k1",            "K1") or "K1",
+        "m2":              getattr(cfg, "csv_m2",            "MW") or "MW",
+        "battery_label":   getattr(cfg, "csv_battery_label", "Battery") or "Battery",
+        "battery_value":   getattr(cfg, "csv_battery_value", "12.0") or "12.0",
+        "timestamp_col":   getattr(cfg, "csv_timestamp_col", "timestamp") or "timestamp",
+        "timestamp_format":getattr(cfg, "csv_timestamp_format", "auto") or "auto",
+        "skip_cols":       [],
+        "skip_nan":        bool(getattr(cfg, "csv_skip_nan", True)),
+    }
+
+    # User-level skip columns (comma-separated string)
+    skip_str = (getattr(cfg, "csv_skip_cols", "") or "").strip()
+    if skip_str:
+        defaults["skip_cols"] = [s.strip() for s in skip_str.split(",") if s.strip()]
+
+    config_path = (getattr(cfg, "csv_source_config", "") or "").strip()
+    csv_files = sorted(f for f in os.listdir(folder) if f.lower().endswith(".csv"))
+    log(f"CSV source: scanning {len(csv_files)} .csv file(s) in {folder!r}")
+
+    recs: List[_MailRecord] = []
+    seq = int(getattr(cfg, "csv_seq_start", 1) or 1)
+
+    for fname in csv_files:
+        fpath = os.path.join(folder, fname)
+        hdr = _load_csv_header_cfg(config_path, fname, defaults)
+
+        ts_col   = (hdr.get("timestamp_col")    or "timestamp").strip()
+        ts_fmt   = (hdr.get("timestamp_format") or "auto").strip()
+        xyz      = (hdr.get("xyz")              or "").strip()
+        tag      = (hdr.get("tag")              or "").strip()
+        k1       = (hdr.get("k1")               or "K1").strip()
+        m2       = (hdr.get("m2")               or "MW").strip()
+        bat_lbl  = (hdr.get("battery_label")    or "Battery").strip()
+        bat_val  = (hdr.get("battery_value")    or "12.0").strip()
+        skip_nan = bool(hdr.get("skip_nan", True))
+
+        raw_skip = hdr.get("skip_cols") or []
+        if isinstance(raw_skip, str):
+            raw_skip = [x.strip() for x in raw_skip.split(",") if x.strip()]
+        skip_set = set(raw_skip)
+
+        sender = tag if tag else "csv-source@local"
+
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh)
+                rows = list(reader)
+        except Exception as e:
+            log(f"CSV source: failed to read {fname}: {e}")
+            continue
+
+        if not rows:
+            log(f"CSV source: {fname} → empty, skipping")
+            continue
+
+        log(f"CSV source: {fname} -> {len(rows)} rows, {len(rows[0])} columns")
+
+        for row in rows:
+            ts_raw = (row.get(ts_col) or "").strip()
+            dt, ts12 = _parse_csv_ts(ts_raw, ts_fmt)
+            if not ts12:
+                continue  # skip rows with unparseable timestamps
+
+            received_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            if dt_cutoff is not None and dt < dt_cutoff:
+                continue
+
+            # Build key-value pairs from remaining columns
+            kv_parts: List[str] = []
+            for col, val in row.items():
+                if col == ts_col or col in skip_set:
+                    continue
+                val_str = (val or "").strip()
+                if val_str in _CSV_NAN_VALUES:
+                    if skip_nan:
+                        continue
+                    val_str = ""
+                kv_parts.append(_sanitize_d_key(col))
+                kv_parts.append(val_str)
+
+            # Assemble #D line (no trailing ** — the existing pipeline adds it)
+            d_parts = (
+                ["#D", str(seq), "##", xyz, tag, k1, k1, m2, m2, ts12, bat_lbl, bat_val]
+                + kv_parts
+            )
+            body = ",".join(d_parts)
+
+            entry_id = f"{fname}::{ts12}"
+            subject  = f"CSV-{tag}-{ts12}" if tag else f"CSV-{ts12}"
+
+            recs.append(_MailRecord(
+                subject=subject,
+                sender=sender,
+                received_time=received_time,
+                body=body,
+                entry_id=entry_id,
+            ))
+            seq += 1
+
+    recs.sort(key=lambda r: r.received_time, reverse=True)
+    log(f"CSV source: {len(recs)} record(s) after filtering")
     return recs
 
 
@@ -1458,7 +1861,8 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
         if not cfg.db_path:
             raise ValueError("EmailParserConfig.db_path is empty.")
         os.makedirs(os.path.dirname(os.path.abspath(cfg.db_path) or "."), exist_ok=True)
-        log(f"Running email parser → DB: {cfg.db_path} | source: {('WEBHOOK' if getattr(cfg, 'webhook_enabled', False) else cfg.mailbox)} | {len(cfg.folder_paths or [])} folder(s)")
+        _src_label = "WEBHOOK" if getattr(cfg, "webhook_enabled", False) else ("BDC_BACKUP" if getattr(cfg, "bdc_backup_enabled", False) else ("CSV_SOURCE" if getattr(cfg, "csv_source_enabled", False) else cfg.mailbox))
+        log(f"Running email parser → DB: {cfg.db_path} | source: {_src_label} | {len(cfg.folder_paths or [])} folder(s)")
     else:
         # Destinations
         if not (cfg.use_local_output or cfg.use_ftp_output):
@@ -1480,11 +1884,13 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             f"Running email parser → {fmt.upper()} to "
             f"{'LOCAL' if cfg.use_local_output else 'TEMP'} dir: {dest_dir} | "
             f"FTP={'ON' if cfg.use_ftp_output else 'OFF'} | "
-            f"source: {('WEBHOOK' if getattr(cfg, 'webhook_enabled', False) else cfg.mailbox)} | "
+            f"source: {('WEBHOOK' if getattr(cfg, 'webhook_enabled', False) else ('BDC_BACKUP' if getattr(cfg, 'bdc_backup_enabled', False) else ('CSV_SOURCE' if getattr(cfg, 'csv_source_enabled', False) else cfg.mailbox)))} | "
             f"{len(cfg.folder_paths or [])} folder(s)"
         )
 
     use_webhook = bool(getattr(cfg, "webhook_enabled", False))
+    use_bdc     = bool(getattr(cfg, "bdc_backup_enabled", False))
+    use_csv     = bool(getattr(cfg, "csv_source_enabled", False))
 
     # Optional FTP pre-check
     ftp_session: Optional[FTPSession] = None
@@ -1497,8 +1903,8 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
             else:
                 log(f"FTP connection check failed: {err}")
 
-    # Outlook mailbox handle if not webhook
-    if not use_webhook:
+    # Outlook mailbox handle only when not using a file/API source
+    if not use_webhook and not use_bdc and not use_csv:
         mailbox = resolve_mailbox(cfg.mailbox)
         _ = _get_namespace()  # ensure Outlook objects are created
 
@@ -1628,6 +2034,22 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                     log(f"Webhook fetch failed: {e}")
                     results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
                     continue
+            elif use_bdc:
+                try:
+                    messages = _bdc_backup_iter_messages(cfg, folder_tag, dt_cutoff, logger)
+                    log(f"BDC backup '{cfg.bdc_backup_folder}' | {len(messages)} records (newest→oldest)")
+                except Exception as e:
+                    log(f"BDC backup read failed: {e}")
+                    results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
+                    continue
+            elif use_csv:
+                try:
+                    messages = _csv_source_iter_messages(cfg, folder_tag, dt_cutoff, logger)
+                    log(f"CSV source '{cfg.csv_source_folder}' | {len(messages)} records (newest→oldest)")
+                except Exception as e:
+                    log(f"CSV source read failed: {e}")
+                    results[' > '.join(path)] = {"inserted": 0, "skipped": 0}
+                    continue
             else:
                 try:
                     folder = resolve_folder_path(mailbox, path)
@@ -1664,9 +2086,10 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 except Exception:
                     pass
 
-            iterable = messages if use_webhook else items
-            count = len(messages) if use_webhook else getattr(items, "Count", -1)
-            source_label = "WEBHOOK" if use_webhook else cfg.mailbox
+            _use_messages = use_webhook or use_bdc or use_csv
+            iterable = messages if _use_messages else items
+            count = len(messages) if _use_messages else getattr(items, "Count", -1)
+            source_label = "WEBHOOK" if use_webhook else ("BDC_BACKUP" if use_bdc else ("CSV_SOURCE" if use_csv else cfg.mailbox))
             log(f"Scanning {source_label} > " + " > ".join(path) + (f" | {count} items" if isinstance(count, int) and count >= 0 else ""))
 
             inserted = 0
@@ -1684,8 +2107,8 @@ def run_parser(cfg: EmailParserConfig, logger: Optional[Callable[[str], None]] =
                 exported_any_for_message = False
                 entry_id = ""
                 try:
-                    if use_webhook:
-                        # msg is _MailRecord from webhook iterator
+                    if use_webhook or use_bdc or use_csv:
+                        # msg is _MailRecord from webhook/BDC/CSV iterator
                         subject = msg.subject or ""
                         sender_name = msg.sender or ""
                         sender_email = msg.sender or ""

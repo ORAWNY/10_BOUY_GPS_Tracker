@@ -165,8 +165,15 @@ class EmailParserDialog(QDialog):
         src_row = QHBoxLayout()
         src_row.addWidget(QLabel("Source:"))
         self.source_combo = QComboBox()
-        self.source_combo.addItems(["Outlook", "Webhook"])
-        self.source_combo.setCurrentText("Webhook" if getattr(self._initial, "webhook_enabled", False) else "Outlook")
+        self.source_combo.addItems(["Outlook", "Webhook", "BDC Backup", "CSV Source"])
+        if getattr(self._initial, "csv_source_enabled", False):
+            self.source_combo.setCurrentText("CSV Source")
+        elif getattr(self._initial, "bdc_backup_enabled", False):
+            self.source_combo.setCurrentText("BDC Backup")
+        elif getattr(self._initial, "webhook_enabled", False):
+            self.source_combo.setCurrentText("Webhook")
+        else:
+            self.source_combo.setCurrentText("Outlook")
         self.source_combo.setMinimumWidth(220)
         src_row.addWidget(self.source_combo, 1)
         src_layout.addLayout(src_row)
@@ -175,11 +182,15 @@ class EmailParserDialog(QDialog):
         self.stack = QStackedWidget()
         self.page_outlook = self._build_page_outlook()
         self.page_webhook = self._build_page_webhook()
-        self.stack.addWidget(self.page_outlook)
-        self.stack.addWidget(self.page_webhook)
+        self.page_bdc = self._build_page_bdc()
+        self.page_csv = self._build_page_csv()
+        self.stack.addWidget(self.page_outlook)   # index 0
+        self.stack.addWidget(self.page_webhook)   # index 1
+        self.stack.addWidget(self.page_bdc)       # index 2
+        self.stack.addWidget(self.page_csv)       # index 3
         src_layout.addWidget(self.stack)
 
-        sec_source = CollapsibleSection("Source (Outlook/Webhook)", src_container, start_collapsed=False)
+        sec_source = CollapsibleSection("Source", src_container, start_collapsed=False)
         page.addWidget(sec_source)
 
         # ──────────────────────────────────────
@@ -561,11 +572,155 @@ class EmailParserDialog(QDialog):
         v.addWidget(QLabel("Note: Webhook polling ignores folders; a logical 'WEBHOOK' tag is used internally."))
         return w
 
+    def _build_page_bdc(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        bdc_grid = QFormLayout()
+        folder_row = QHBoxLayout()
+        self.bdc_folder_edit = QLineEdit(getattr(self._initial, "bdc_backup_folder", ""))
+        self.bdc_folder_edit.setPlaceholderText("Path to folder containing .txt backup queue files…")
+        btn_browse = QPushButton("Browse…")
+
+        def _browse():
+            from PyQt6.QtWidgets import QFileDialog
+            d = QFileDialog.getExistingDirectory(w, "Select BDC backup folder", self.bdc_folder_edit.text() or "")
+            if d:
+                self.bdc_folder_edit.setText(d)
+
+        btn_browse.clicked.connect(_browse)
+        folder_row.addWidget(self.bdc_folder_edit, 1)
+        folder_row.addWidget(btn_browse)
+        bdc_grid.addRow("Backup folder:", folder_row)
+        v.addLayout(bdc_grid)
+        v.addWidget(QLabel(
+            "All .txt files in the folder are scanned for failed/pending JSON records.\n"
+            "Each record's payload is processed exactly like an incoming email message.\n"
+            "Records are deduplicated by their message ID so re-runs are safe."
+        ))
+        return w
+
+    def _build_page_csv(self) -> QWidget:
+        w = QWidget()
+        outer = QVBoxLayout(w)
+
+        # ── Folder ──────────────────────────────────────────────
+        folder_row = QHBoxLayout()
+        self.csv_folder_edit = QLineEdit(getattr(self._initial, "csv_source_folder", ""))
+        self.csv_folder_edit.setPlaceholderText("Folder containing .csv files…")
+        btn_folder = QPushButton("Browse…")
+        def _browse_folder():
+            d = QFileDialog.getExistingDirectory(w, "Select CSV source folder", self.csv_folder_edit.text() or "")
+            if d:
+                self.csv_folder_edit.setText(d)
+        btn_folder.clicked.connect(_browse_folder)
+        folder_row.addWidget(QLabel("CSV folder:"))
+        folder_row.addWidget(self.csv_folder_edit, 1)
+        folder_row.addWidget(btn_folder)
+        outer.addLayout(folder_row)
+
+        # ── Per-pattern config file (optional) ──────────────────
+        cfg_row = QHBoxLayout()
+        self.csv_config_edit = QLineEdit(getattr(self._initial, "csv_source_config", ""))
+        self.csv_config_edit.setPlaceholderText("Optional: per-filename-pattern JSON config…")
+        btn_cfg = QPushButton("Browse…")
+        def _browse_cfg():
+            p, _ = QFileDialog.getOpenFileName(w, "Select CSV header config", self.csv_config_edit.text() or "", "JSON (*.json)")
+            if p:
+                self.csv_config_edit.setText(p)
+        btn_cfg.clicked.connect(_browse_cfg)
+        cfg_row.addWidget(QLabel("Pattern config:"))
+        cfg_row.addWidget(self.csv_config_edit, 1)
+        cfg_row.addWidget(btn_cfg)
+        outer.addLayout(cfg_row)
+
+        # ── #D header defaults ───────────────────────────────────
+        hdr_box = QGroupBox("#D message header defaults")
+        hdr_grid = QFormLayout(hdr_box)
+
+        self.csv_xyz_edit   = QLineEdit(getattr(self._initial, "csv_xyz",           ""))
+        self.csv_tag_edit   = QLineEdit(getattr(self._initial, "csv_tag",           ""))
+        self.csv_k1_edit    = QLineEdit(getattr(self._initial, "csv_k1",            "K1"))
+        self.csv_m2_edit    = QLineEdit(getattr(self._initial, "csv_m2",            "MW"))
+        self.csv_bat_lbl    = QLineEdit(getattr(self._initial, "csv_battery_label", "Battery"))
+        self.csv_bat_val    = QLineEdit(getattr(self._initial, "csv_battery_value", "12.0"))
+
+        for label, widget, tip in [
+            ("XYZ (position):",   self.csv_xyz_edit, "e.g. EW1  — position field after ##"),
+            ("TAG (device):",     self.csv_tag_edit, "e.g. SBC1W  — also used to match lookup files"),
+            ("K1:",               self.csv_k1_edit,  "e.g. K1"),
+            ("M2:",               self.csv_m2_edit,  "e.g. MW"),
+            ("Battery label:",    self.csv_bat_lbl,  "e.g. Battery"),
+            ("Battery default:",  self.csv_bat_val,  "e.g. 12.0  — written when no battery column"),
+        ]:
+            widget.setToolTip(tip)
+            hdr_grid.addRow(label, widget)
+
+        outer.addWidget(hdr_box)
+
+        # ── Timestamp settings ───────────────────────────────────
+        ts_box = QGroupBox("Timestamp")
+        ts_grid = QFormLayout(ts_box)
+
+        self.csv_ts_col_edit = QLineEdit(getattr(self._initial, "csv_timestamp_col", "timestamp"))
+        self.csv_ts_col_edit.setToolTip("Name of the timestamp column in the CSV (default: timestamp)")
+
+        self.csv_ts_fmt_combo = QComboBox()
+        self.csv_ts_fmt_combo.setEditable(True)
+        fmt_options = [
+            "auto",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y",
+        ]
+        self.csv_ts_fmt_combo.addItems(fmt_options)
+        init_fmt = getattr(self._initial, "csv_timestamp_format", "auto") or "auto"
+        if init_fmt in fmt_options:
+            self.csv_ts_fmt_combo.setCurrentText(init_fmt)
+        else:
+            self.csv_ts_fmt_combo.setCurrentText(init_fmt)
+        self.csv_ts_fmt_combo.setToolTip("'auto' tries common formats. Or enter a strptime string.")
+
+        ts_grid.addRow("Timestamp column:", self.csv_ts_col_edit)
+        ts_grid.addRow("Timestamp format:", self.csv_ts_fmt_combo)
+        outer.addWidget(ts_box)
+
+        # ── Column handling ──────────────────────────────────────
+        col_box = QGroupBox("Column handling")
+        col_grid = QFormLayout(col_box)
+
+        self.csv_skip_cols_edit = QLineEdit(getattr(self._initial, "csv_skip_cols", ""))
+        self.csv_skip_cols_edit.setPlaceholderText("Comma-separated column names to exclude…")
+        self.csv_skip_cols_edit.setToolTip("These columns will not appear in the #D output line")
+
+        self.csv_skip_nan_chk = QCheckBox("Omit columns whose value is NaN / empty")
+        self.csv_skip_nan_chk.setChecked(bool(getattr(self._initial, "csv_skip_nan", True)))
+
+        self.csv_seq_edit = QLineEdit(str(getattr(self._initial, "csv_seq_start", 1) or 1))
+        self.csv_seq_edit.setToolTip("Starting sequence number for the #D line counter")
+
+        col_grid.addRow("Skip columns:", self.csv_skip_cols_edit)
+        col_grid.addRow("", self.csv_skip_nan_chk)
+        col_grid.addRow("Seq start:", self.csv_seq_edit)
+        outer.addWidget(col_box)
+
+        outer.addWidget(QLabel(
+            "Each CSV row becomes one #D message using the header fields above.\n"
+            "The TAG value is also used as the lookup key — name your lookup file\n"
+            "<TAG>.json (e.g. SBC1W.json) to apply column renaming / ordering.\n"
+            "The optional pattern config JSON lets you set different header fields\n"
+            "per filename pattern for mixed-device folders."
+        ))
+        outer.addStretch()
+        return w
+
     # ──────────────────────────────────────
     # UI helpers
     # ──────────────────────────────────────
     def _on_source_changed(self, name: str):
-        idx = {"Outlook": 0, "Webhook": 1}.get(name, 0)
+        idx = {"Outlook": 0, "Webhook": 1, "BDC Backup": 2, "CSV Source": 3}.get(name, 0)
         self.stack.setCurrentIndex(idx)
         self.mailbox_edit.setEnabled(True)
         self._refresh_visibility()
@@ -753,7 +908,28 @@ class EmailParserDialog(QDialog):
 
         # Source flags
         src = self.source_combo.currentText()
-        cfg.webhook_enabled = (src == "Webhook")
+        cfg.webhook_enabled    = (src == "Webhook")
+        cfg.bdc_backup_enabled = (src == "BDC Backup")
+        cfg.csv_source_enabled = (src == "CSV Source")
+        cfg.bdc_backup_folder  = getattr(self, "bdc_folder_edit", QLineEdit()).text().strip()
+
+        # CSV source settings
+        cfg.csv_source_folder   = getattr(self, "csv_folder_edit",    QLineEdit()).text().strip()
+        cfg.csv_source_config   = getattr(self, "csv_config_edit",    QLineEdit()).text().strip()
+        cfg.csv_xyz             = getattr(self, "csv_xyz_edit",        QLineEdit()).text().strip()
+        cfg.csv_tag             = getattr(self, "csv_tag_edit",        QLineEdit()).text().strip()
+        cfg.csv_k1              = getattr(self, "csv_k1_edit",         QLineEdit("K1")).text().strip() or "K1"
+        cfg.csv_m2              = getattr(self, "csv_m2_edit",         QLineEdit("MW")).text().strip() or "MW"
+        cfg.csv_battery_label   = getattr(self, "csv_bat_lbl",         QLineEdit("Battery")).text().strip() or "Battery"
+        cfg.csv_battery_value   = getattr(self, "csv_bat_val",         QLineEdit("12.0")).text().strip() or "12.0"
+        cfg.csv_timestamp_col   = getattr(self, "csv_ts_col_edit",     QLineEdit("timestamp")).text().strip() or "timestamp"
+        cfg.csv_timestamp_format = getattr(self, "csv_ts_fmt_combo",   QComboBox()).currentText().strip() or "auto"
+        cfg.csv_skip_cols       = getattr(self, "csv_skip_cols_edit",  QLineEdit()).text().strip()
+        cfg.csv_skip_nan        = getattr(self, "csv_skip_nan_chk",    QCheckBox()).isChecked()
+        try:
+            cfg.csv_seq_start   = int(getattr(self, "csv_seq_edit",    QLineEdit("1")).text().strip() or "1")
+        except ValueError:
+            cfg.csv_seq_start   = 1
 
         # Outlook folders → folder_paths
         cfg.folder_paths = []
@@ -763,6 +939,10 @@ class EmailParserDialog(QDialog):
                 if p and p[0].strip().lower() == cfg.mailbox.strip().lower():
                     p = p[1:]
                 cfg.folder_paths.append(p)
+        elif src == "BDC Backup":
+            cfg.folder_paths = [["BDC_BACKUP"]]
+        elif src == "CSV Source":
+            cfg.folder_paths = [["CSV_SOURCE"]]
         else:
             cfg.folder_paths = [["WEBHOOK"]]
 
